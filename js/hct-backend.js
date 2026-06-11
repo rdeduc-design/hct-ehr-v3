@@ -1,20 +1,31 @@
 /* ════════════════════════════════════════════════════════════════════════
-   HCT EHR — Backend Integration Layer (v11)
+   HCT EHR — Backend Integration Layer (v12 — True Shared Real-Time)
    Healthcare and Technology Institute Inc. · "How Care Transforms"
 
-   1. Authentication (Supabase email/password)
-   2. Cloud persistence — autosaved per user every 10 s
-   3. TRUE REAL-TIME SYNC — Supabase Realtime broadcast channel
-      · per-patient change detection every 2 s
-      · instant WebSocket push to every connected device/account
-      · incoming changes applied immediately + views re-rendered
-      · clinical alerts re-evaluated on vital-sign / screening changes
-      · toast notifications describe exactly what changed and who did it
-   4. DB-level postgres_changes fallback (Realtime must be enabled in Supabase)
-   5. 15-second DB-poll fallback (handles reconnects / cold starts)
-   6. Student progress sync + chart submissions
-   7. Faculty Dashboard (tabs, roster, grading, analytics)
-   8. Mobile off-canvas sidebar
+   Architecture overview:
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │  shared_ehr_state  (clinical data — ALL users share same rows)      │
+   │  ehr_patients      (patient roster with soft-delete)                │
+   │  ehr_notifications (persistent cross-user notification feed)        │
+   │  chart_states      (per-user prefs/progress — backward compat)      │
+   └─────────────────────────────────────────────────────────────────────┘
+
+   Real-time flow:
+   User A writes data → memory updated → hctFlushNow() →
+     • WebSocket broadcast (instant, < 50 ms)          → User B/C receive
+     • shared_ehr_state upsert (next 100 ms tick)      → postgres_changes
+       fires on User B/C even if WS missed             → merge + re-render
+
+   Patients:
+   • Admitting  → ehr_patients INSERT + postgres_changes → all users
+   • Discharging → is_discharged=true (soft delete)     → all users
+   • Admin restore → is_discharged=false               → all users
+   • Hard delete (admin) → deleted_at=now()            → hidden from all
+
+   Notifications:
+   • Every logSave() → ehr_notifications INSERT → postgres_changes
+     fires on every connected client → badge increments + panel updates
+
    ════════════════════════════════════════════════════════════════════════ */
 (function () {
   'use strict';
@@ -22,32 +33,31 @@
   var CFG  = window.HCT_CONFIG || {};
   var DEMO = !(CFG.SUPABASE_URL && CFG.SUPABASE_ANON_KEY);
   var sb   = null;
-  var hctSession  = null;   // Supabase auth session
-  var hctProfile  = null;   // { id, full_name, role, student_no, email }
-  var lastSavedState     = null;
-  var lastSyncedProgress = null;
+  var hctSession  = null;
+  var hctProfile  = null;
+  var lastSavedState      = null;
+  var lastSyncedProgress  = null;
   var saving = false;
 
-  // Timers
-  var saveTimer      = null;
-  var progTimer      = null;
-  var pollTimer      = null;
-  var broadcastTimer = null;
+  var saveTimer        = null;
+  var progTimer        = null;
+  var pollTimer        = null;
+  var broadcastTimer   = null;
 
-  // Realtime channels
-  var liveChannel     = null;   // broadcast channel (instant sync)
-  var realtimeChannel = null;   // postgres_changes channel (fallback)
+  var liveChannel       = null;
+  var dbChannel         = null;
 
-  // Per-key snapshot for change detection
-  // Shape: { storeKey: { pxId: JSON_string } }  for per-patient stores
-  //        { '__'+storeKey: JSON_string }         for flat/list stores
   var lastBroadcastSnap = {};
+  var lastSharedSnap    = {};
+  var _patientsSeeded   = false;
 
   if (!DEMO) {
     try {
-      sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+      sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
+        realtime: { params: { eventsPerSecond: 20 } }
+      });
     } catch (e) {
-      console.error('[HCT] Supabase init failed, falling back to demo mode:', e);
+      console.error('[HCT] Supabase init failed:', e);
       DEMO = true;
     }
   }
@@ -56,67 +66,42 @@
      STORE CATALOGUES
      ───────────────────────────────────────────────────────────────────── */
 
-  // Stores keyed by patient ID (pxId → data)
   var PER_PATIENT_STORES = [
-    'VS_DATA', 'NOTES_STORE', 'MAR_MEDS', 'MAR_HISTORY', 'MAR_STATUS', 'MAR_PRN',
-    'PROB_LIST_STORE', 'ALLERGIES', 'ADM_INFO_STORE', 'HPI_STORE', 'PMSH_STORE',
-    'CAREPLAN_STORE', 'SBAR_STORE', 'LAB_DATA', 'IMAGING_STORE', 'BB_STORE',
-    'MICRO_STORE', 'PANELS_STORE', 'FLOWSHEET_STORE', 'FSH_STORE', 'IO_ENTRIES',
-    'ROS_ENTRIES', 'PE_ENTRIES', 'IMMUNIZATIONS', 'FORMS_STORE', 'FORM_DATA',
-    'OB_STORE', 'HOMEMEDS_STORE', 'SCR_ENTRIES', 'EHR_STORE',
-    'ALERT_STORE', 'SAVE_LOG'
+    'VS_DATA','NOTES_STORE','MAR_MEDS','MAR_HISTORY','MAR_STATUS','MAR_PRN',
+    'PROB_LIST_STORE','ALLERGIES','ADM_INFO_STORE','HPI_STORE','PMSH_STORE',
+    'CAREPLAN_STORE','SBAR_STORE','LAB_DATA','IMAGING_STORE','BB_STORE',
+    'MICRO_STORE','PANELS_STORE','FLOWSHEET_STORE','FSH_STORE','IO_ENTRIES',
+    'ROS_ENTRIES','PE_ENTRIES','IMMUNIZATIONS','FORMS_STORE','FORM_DATA',
+    'OB_STORE','HOMEMEDS_STORE','SCR_ENTRIES','EHR_STORE','ALERT_STORE','SAVE_LOG'
   ];
 
-  // Patient-list stores keyed by ward/clinic/wing
-  var PATIENT_LIST_STORES = ['PATIENTS', 'OPD_PATIENTS', 'LTC_PATIENTS'];
+  var PATIENT_LIST_STORES = ['PATIENTS','OPD_PATIENTS','LTC_PATIENTS'];
+  var FLAT_STORES         = ['WARD_ROOMS','VISIT_TYPE_MAP','MRN_MAP'];
+  var ARRAY_STORES        = ['GLOBAL_ALERTS'];
 
-  // Flat object stores
-  var FLAT_STORES = ['WARD_ROOMS', 'VISIT_TYPE_MAP', 'MRN_MAP'];
+  var ALL_SHARED_STORES   = PER_PATIENT_STORES.concat(FLAT_STORES).concat(ARRAY_STORES);
 
-  // Array stores
-  var ARRAY_STORES = ['GLOBAL_ALERTS'];
-
-  // All STATE_KEYS for DB persistence
   var STATE_KEYS = PER_PATIENT_STORES
-    .concat(PATIENT_LIST_STORES)
-    .concat(FLAT_STORES)
-    .concat(ARRAY_STORES)
-    .concat(['FACULTY_PROGRESS', 'SUBMITTED_CHARTS', 'DEBRIEF_SUBMITTED',
-             'SAMPLE_NOTES_LOADED', 'IMG_UPLOAD_DATA']);
+    .concat(PATIENT_LIST_STORES).concat(FLAT_STORES).concat(ARRAY_STORES)
+    .concat(['FACULTY_PROGRESS','SUBMITTED_CHARTS','DEBRIEF_SUBMITTED',
+             'SAMPLE_NOTES_LOADED','IMG_UPLOAD_DATA']);
 
-  // Human-readable labels for notifications
   var STORE_LABELS = {
-    VS_DATA:          'Vital Signs',
-    NOTES_STORE:      'Nursing Notes',
-    MAR_MEDS:         'Medication Orders',
-    MAR_HISTORY:      'Medication Administration',
-    MAR_STATUS:       'MAR Status',
-    MAR_PRN:          'PRN Medications',
-    PROB_LIST_STORE:  'Problem List / Diagnosis',
-    ALLERGIES:        'Allergies',
-    ADM_INFO_STORE:   'Admission Information',
-    HPI_STORE:        'History of Present Illness',
-    PMSH_STORE:       'Past Medical History',
-    CAREPLAN_STORE:   'Care Plan',
-    SBAR_STORE:       'SBAR Communication',
-    LAB_DATA:         'Laboratory Results',
-    IMAGING_STORE:    'Imaging / Radiology',
-    BB_STORE:         'Blood Bank',
-    MICRO_STORE:      'Microbiology',
-    FLOWSHEET_STORE:  'Flowsheet',
-    IO_ENTRIES:       'Intake & Output',
-    IMMUNIZATIONS:    'Immunizations',
-    EHR_STORE:        'Chart Entry',
-    SCR_ENTRIES:      'Screening Results',
-    ALERT_STORE:      'Clinical Alert',
-    GLOBAL_ALERTS:    'Global Alert',
-    PATIENTS:         'Inpatient Admission',
-    OPD_PATIENTS:     'Outpatient Registration',
-    LTC_PATIENTS:     'LTC Resident Registration',
-    WARD_ROOMS:       'Room / Bed Assignment'
+    VS_DATA:'Vital Signs', NOTES_STORE:'Nursing Notes', MAR_MEDS:'Medication Orders',
+    MAR_HISTORY:'Medication Administration', MAR_STATUS:'MAR Status',
+    MAR_PRN:'PRN Medications', PROB_LIST_STORE:'Problem List / Diagnosis',
+    ALLERGIES:'Allergies', ADM_INFO_STORE:'Admission Information',
+    HPI_STORE:'History of Present Illness', PMSH_STORE:'Past Medical History',
+    CAREPLAN_STORE:'Care Plan', SBAR_STORE:'SBAR Communication',
+    LAB_DATA:'Laboratory Results', IMAGING_STORE:'Imaging / Radiology',
+    BB_STORE:'Blood Bank', MICRO_STORE:'Microbiology', FLOWSHEET_STORE:'Flowsheet',
+    IO_ENTRIES:'Intake & Output', IMMUNIZATIONS:'Immunizations',
+    EHR_STORE:'Chart Entry', SCR_ENTRIES:'Screening Results',
+    ALERT_STORE:'Clinical Alert', GLOBAL_ALERTS:'Global Alert',
+    PATIENTS:'Inpatient Admission', OPD_PATIENTS:'Outpatient Registration',
+    LTC_PATIENTS:'LTC Resident Registration', WARD_ROOMS:'Room / Bed Assignment'
   };
 
-  // Only these stores show a toast notification (avoid noise for minor stores)
   var NOTIFY_STORES = {
     VS_DATA:1, NOTES_STORE:1, MAR_MEDS:1, MAR_HISTORY:1, PROB_LIST_STORE:1,
     ALLERGIES:1, CAREPLAN_STORE:1, SBAR_STORE:1, LAB_DATA:1, IMAGING_STORE:1,
@@ -124,109 +109,464 @@
     PATIENTS:1, OPD_PATIENTS:1, LTC_PATIENTS:1
   };
 
-  // These stores trigger clinical alert re-evaluation after incoming changes
   var ALERT_TRIGGER_STORES = { VS_DATA:1, SCR_ENTRIES:1 };
 
   /* ─────────────────────────────────────────────────────────────────────
-     1. STATE PERSISTENCE (DB save / load / flush)
+     1. SHARED STATE — load / save / subscribe
      ───────────────────────────────────────────────────────────────────── */
-  function collectState() {
-    var state = {};
-    STATE_KEYS.forEach(function (k) {
-      if (typeof window[k] !== 'undefined') {
-        try { state[k] = window[k]; } catch (e) {}
+
+  async function loadSharedState() {
+    if (DEMO || !sb) return;
+    try {
+      var res = await sb.from('shared_ehr_state').select('state_key,px_id,data');
+      if (res.error) { console.warn('[HCT] load shared state error:', res.error.message); return; }
+      (res.data || []).forEach(function (row) {
+        applySharedRow(row.state_key, row.px_id, row.data);
+        try { lastSharedSnap[row.state_key + '|' + row.px_id] = JSON.stringify(row.data); } catch(e){}
+      });
+      try { if (typeof init === 'function') init(); } catch(e){}
+    } catch(e) { console.warn('[HCT] load shared state failed:', e); }
+  }
+
+  function applySharedRow(key, pxId, data) {
+    if (!key || data === undefined || data === null) return;
+    if (pxId && pxId !== '__global' && PER_PATIENT_STORES.indexOf(key) >= 0) {
+      if (!window[key]) window[key] = {};
+      window[key][pxId] = data;
+    } else if (FLAT_STORES.indexOf(key) >= 0) {
+      window[key] = Object.assign({}, window[key] || {}, data);
+    } else if (ARRAY_STORES.indexOf(key) >= 0 && Array.isArray(data)) {
+      var local = window[key] || [];
+      var localKeys = local.map(function(a){ return (a.msg||'')+'|'+(a.pxId||''); });
+      var newOnes = data.filter(function(a){
+        return localKeys.indexOf((a.msg||'')+'|'+(a.pxId||'')) < 0;
+      });
+      if (newOnes.length) window[key] = local.concat(newOnes);
+    }
+  }
+
+  async function saveSharedState() {
+    if (DEMO || !sb || !hctSession) return;
+    var rows = [];
+    var now  = new Date().toISOString();
+    var uid  = hctSession.user.id;
+    var uname = hctProfile ? (hctProfile.full_name || 'User') : 'User';
+
+    PER_PATIENT_STORES.forEach(function(key) {
+      var store = window[key];
+      if (!store || typeof store !== 'object') return;
+      Object.keys(store).forEach(function(pxId) {
+        try {
+          var curr = JSON.stringify(store[pxId]);
+          var snapKey = key + '|' + pxId;
+          if (curr === lastSharedSnap[snapKey]) return;
+          rows.push({ state_key: key, px_id: pxId, data: store[pxId],
+                      updated_by: uid, updated_by_name: uname, updated_at: now });
+          lastSharedSnap[snapKey] = curr;
+        } catch(e){}
+      });
+    });
+
+    FLAT_STORES.forEach(function(key) {
+      var store = window[key];
+      if (!store) return;
+      try {
+        var curr = JSON.stringify(store);
+        var snapKey = key + '|__global';
+        if (curr === lastSharedSnap[snapKey]) return;
+        rows.push({ state_key: key, px_id: '__global', data: store,
+                    updated_by: uid, updated_by_name: uname, updated_at: now });
+        lastSharedSnap[snapKey] = curr;
+      } catch(e){}
+    });
+
+    ARRAY_STORES.forEach(function(key) {
+      var store = window[key];
+      if (!Array.isArray(store) || !store.length) return;
+      try {
+        var curr = JSON.stringify(store);
+        var snapKey = key + '|__global';
+        if (curr === lastSharedSnap[snapKey]) return;
+        rows.push({ state_key: key, px_id: '__global', data: store,
+                    updated_by: uid, updated_by_name: uname, updated_at: now });
+        lastSharedSnap[snapKey] = curr;
+      } catch(e){}
+    });
+
+    if (!rows.length) return;
+    try {
+      var chunks = [];
+      for (var i = 0; i < rows.length; i += 50) chunks.push(rows.slice(i, i + 50));
+      for (var c = 0; c < chunks.length; c++) {
+        var res = await sb.from('shared_ehr_state').upsert(chunks[c],
+          { onConflict: 'state_key,px_id' });
+        if (res.error) console.warn('[HCT] shared state save error:', res.error.message);
+      }
+    } catch(e) { console.warn('[HCT] shared state save failed:', e); }
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     2. PATIENT TABLE — load / admit / update / discharge / restore
+     ───────────────────────────────────────────────────────────────────── */
+
+  async function loadPatients() {
+    if (DEMO || !sb) return;
+    try {
+      var res = await sb.from('ehr_patients')
+        .select('*')
+        .is('deleted_at', null)
+        .eq('is_discharged', false)
+        .order('admitted_at', { ascending: true });
+      if (res.error) { console.warn('[HCT] load patients error:', res.error.message); return; }
+      var rows = res.data || [];
+      if (!rows.length) {
+        await seedDefaultPatients();
+        return;
+      }
+      applyPatientRows(rows);
+    } catch(e) { console.warn('[HCT] load patients failed:', e); }
+  }
+
+  function applyPatientRows(rows) {
+    var newPATIENTS     = {};
+    var newOPD          = {};
+    var newLTC          = {};
+    rows.forEach(function(row) {
+      var px = dbRowToPx(row);
+      if (row.section_type === 'outpatient') {
+        if (!newOPD[row.ward]) newOPD[row.ward] = [];
+        newOPD[row.ward].push(px);
+      } else if (row.section_type === 'ltc') {
+        if (!newLTC[row.ward]) newLTC[row.ward] = [];
+        newLTC[row.ward].push(px);
+      } else {
+        if (!newPATIENTS[row.ward]) newPATIENTS[row.ward] = [];
+        newPATIENTS[row.ward].push(px);
       }
     });
-    return state;
+    mergePxStore(window.PATIENTS,     newPATIENTS);
+    mergePxStore(window.OPD_PATIENTS, newOPD);
+    mergePxStore(window.LTC_PATIENTS, newLTC);
   }
 
-  function applyState(state) {
-    if (!state) return;
-    STATE_KEYS.forEach(function (k) {
-      if (state[k] !== undefined && state[k] !== null) window[k] = state[k];
+  function mergePxStore(dest, incoming) {
+    Object.keys(incoming).forEach(function(ward) {
+      if (!dest[ward]) dest[ward] = [];
+      var idMap = {};
+      dest[ward].forEach(function(p, i) { idMap[p.id] = i; });
+      incoming[ward].forEach(function(p) {
+        if (idMap[p.id] !== undefined) dest[ward][idMap[p.id]] = p;
+        else { dest[ward].push(p); idMap[p.id] = dest[ward].length - 1; }
+      });
     });
-    try { if (typeof init === 'function') init(); } catch (e) {}
   }
 
-  function safeStr(obj) {
-    try { return JSON.stringify(obj); } catch (e) { return null; }
+  function dbRowToPx(row) {
+    return {
+      id: row.id, name: row.name, age: row.age, sex: row.sex,
+      room: row.room, dx: row.dx, status: row.status,
+      physician: row.physician, admitted: row.admitted, dob: row.dob,
+      allergies: row.allergies || [], photo: row.photo,
+      _ward: row.ward, _sectionType: row.section_type
+    };
   }
 
-  async function saveChartState(force) {
+  function pxToDbRow(px, sectionType, wardId) {
+    return {
+      id: px.id, mrn: px.mrn || null,
+      name: px.name, age: px.age || null, sex: px.sex || null,
+      room: px.room || null, ward: wardId || px._ward || 'unknown',
+      section_type: sectionType || px._sectionType || 'inpatient',
+      dx: px.dx || null, status: px.status || 'admitted',
+      physician: px.physician || null, admitted: px.admitted || null,
+      dob: px.dob || null, allergies: px.allergies || [],
+      photo: px.photo || null, extra: {},
+      updated_by: hctSession ? hctSession.user.id : null,
+      updated_by_name: hctProfile ? (hctProfile.full_name || 'User') : 'User',
+      updated_at: new Date().toISOString()
+    };
+  }
+
+  async function seedDefaultPatients() {
+    if (_patientsSeeded || DEMO || !sb || !hctSession) return;
+    _patientsSeeded = true;
+    var rows = [];
+    ['PATIENTS','OPD_PATIENTS','LTC_PATIENTS'].forEach(function(storeName) {
+      var store = window[storeName];
+      var stype = storeName === 'PATIENTS' ? 'inpatient'
+                : storeName === 'OPD_PATIENTS' ? 'outpatient' : 'ltc';
+      if (!store) return;
+      Object.keys(store).forEach(function(ward) {
+        (store[ward] || []).forEach(function(px) {
+          rows.push(Object.assign(pxToDbRow(px, stype, ward), {
+            created_by: hctSession.user.id
+          }));
+        });
+      });
+    });
+    if (!rows.length) return;
+    try {
+      var res = await sb.from('ehr_patients').upsert(rows, { onConflict: 'id', ignoreDuplicates: true });
+      if (res.error) console.warn('[HCT] seed patients error:', res.error.message);
+    } catch(e) { console.warn('[HCT] seed patients failed:', e); }
+  }
+
+  window.hctAdmitPatient = async function(px, sectionType, wardId) {
+    if (DEMO || !sb || !hctSession) return;
+    try {
+      var row = Object.assign(pxToDbRow(px, sectionType, wardId), {
+        created_by: hctSession.user.id, admitted_at: new Date().toISOString()
+      });
+      var res = await sb.from('ehr_patients').upsert(row, { onConflict: 'id' });
+      if (res.error) console.warn('[HCT] admit patient error:', res.error.message);
+    } catch(e) { console.warn('[HCT] admit patient failed:', e); }
+  };
+
+  window.hctUpdatePatient = async function(px, sectionType, wardId) {
+    if (DEMO || !sb || !hctSession) return;
+    try {
+      var row = pxToDbRow(px, sectionType, wardId);
+      var res = await sb.from('ehr_patients').update(row).eq('id', px.id);
+      if (res.error) console.warn('[HCT] update patient error:', res.error.message);
+    } catch(e) { console.warn('[HCT] update patient failed:', e); }
+  };
+
+  window.hctDischargePatient = async function(pxId) {
+    if (DEMO || !sb || !hctSession) return;
+    try {
+      var res = await sb.from('ehr_patients').update({
+        is_discharged: true,
+        discharge_date: new Date().toISOString(),
+        updated_by: hctSession.user.id,
+        updated_at: new Date().toISOString()
+      }).eq('id', pxId);
+      if (res.error) console.warn('[HCT] discharge patient error:', res.error.message);
+      else await window.hctPushNotification('Patient discharged', 'info', pxId, 'Discharge');
+    } catch(e) { console.warn('[HCT] discharge patient failed:', e); }
+  };
+
+  window.hctRestorePatient = async function(pxId) {
+    if (DEMO || !sb || !hctSession) return;
+    var isAdmin = hctProfile && hctProfile.role === 'admin';
+    if (!isAdmin) { alert('Only administrators can restore discharged patients.'); return; }
+    try {
+      var res = await sb.from('ehr_patients').update({
+        is_discharged: false,
+        discharge_date: null,
+        deleted_at: null,
+        deleted_by: null,
+        updated_by: hctSession.user.id,
+        updated_at: new Date().toISOString()
+      }).eq('id', pxId);
+      if (res.error) { console.warn('[HCT] restore patient error:', res.error.message); return; }
+      var pxRes = await sb.from('ehr_patients').select('*').eq('id', pxId).single();
+      if (pxRes.data) {
+        var row = pxRes.data;
+        var px  = dbRowToPx(row);
+        var store = row.section_type === 'outpatient' ? window.OPD_PATIENTS
+                  : row.section_type === 'ltc'        ? window.LTC_PATIENTS
+                  : window.PATIENTS;
+        if (!store[row.ward]) store[row.ward] = [];
+        var idx = store[row.ward].findIndex(function(p){ return p.id === pxId; });
+        if (idx >= 0) store[row.ward][idx] = px;
+        else store[row.ward].push(px);
+        try { if (typeof init === 'function') init(); } catch(e){}
+        showLiveToast('Patient restored by admin', 'info');
+        await window.hctPushNotification('Patient restored by admin', 'info', pxId, 'Restore');
+      }
+    } catch(e) { console.warn('[HCT] restore patient failed:', e); }
+  };
+
+  window.hctFetchDischargedPatients = async function() {
+    if (DEMO || !sb) return [];
+    try {
+      var res = await sb.from('ehr_patients')
+        .select('*')
+        .eq('is_discharged', true)
+        .is('deleted_at', null)
+        .order('discharge_date', { ascending: false });
+      return res.data || [];
+    } catch(e) { return []; }
+  };
+
+  /* ─────────────────────────────────────────────────────────────────────
+     3. NOTIFICATIONS — load / push / subscribe / mark-read
+     ───────────────────────────────────────────────────────────────────── */
+
+  async function loadNotifications() {
+    if (DEMO || !sb) return;
+    try {
+      var res = await sb.from('ehr_notifications')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100);
+      if (res.error) { console.warn('[HCT] load notifications error:', res.error.message); return; }
+      (res.data || []).reverse().forEach(function(row) {
+        injectNotifFromDB(row);
+      });
+      updateNotifBadge_safe();
+      renderNotifList_safe();
+    } catch(e) { console.warn('[HCT] load notifications failed:', e); }
+  }
+
+  function injectNotifFromDB(row) {
+    if (!row || !row.id) return;
+    var NOTIF_LOG = window.NOTIF_LOG;
+    if (!Array.isArray(NOTIF_LOG)) { window.NOTIF_LOG = []; NOTIF_LOG = window.NOTIF_LOG; }
+    var existing = NOTIF_LOG.find(function(n){ return n._dbId === row.id; });
+    if (existing) return;
+    var uid = hctSession ? hctSession.user.id : null;
+    var readBy = Array.isArray(row.read_by) ? row.read_by : [];
+    var isRead = uid ? readBy.indexOf(uid) >= 0 : false;
+    window.NOTIF_ID_CTR = (window.NOTIF_ID_CTR || 0) + 1;
+    NOTIF_LOG.unshift({
+      id:      window.NOTIF_ID_CTR,
+      _dbId:   row.id,
+      section: row.section || row.store_key || 'Update',
+      summary: row.message,
+      pxId:    row.px_id || null,
+      ts:      fmtDateShort(row.created_at),
+      read:    isRead,
+      navKey:  row.section || row.store_key || 'vitals',
+      _readBy: readBy
+    });
+  }
+
+  window.hctPushNotification = async function(message, type, pxId, section) {
+    if (DEMO || !sb || !hctSession) return;
+    var pxName = pxId ? findPxName(pxId) : null;
+    try {
+      await sb.from('ehr_notifications').insert({
+        notif_type:      type || 'info',
+        section:         section || null,
+        px_id:           pxId || null,
+        px_name:         pxName || null,
+        message:         message,
+        created_by:      hctSession.user.id,
+        created_by_name: hctProfile ? (hctProfile.full_name || 'User') : 'User',
+        created_by_role: hctProfile ? (hctProfile.role || 'student') : 'student'
+      });
+    } catch(e) { console.warn('[HCT] push notification failed:', e); }
+  };
+
+  window.hctMarkNotifRead = async function(dbId) {
+    if (DEMO || !sb || !hctSession || !dbId) return;
+    var uid = hctSession.user.id;
+    try {
+      var cur = await sb.from('ehr_notifications').select('read_by').eq('id', dbId).single();
+      if (cur.error) return;
+      var readBy = Array.isArray(cur.data.read_by) ? cur.data.read_by : [];
+      if (readBy.indexOf(uid) < 0) {
+        readBy.push(uid);
+        await sb.from('ehr_notifications').update({ read_by: readBy }).eq('id', dbId);
+      }
+    } catch(e){}
+  };
+
+  function updateNotifBadge_safe() {
+    try { if (typeof updateNotifBadge === 'function') updateNotifBadge(); } catch(e){}
+  }
+  function renderNotifList_safe() {
+    try { if (typeof renderNotifList === 'function') renderNotifList(); } catch(e){}
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     4. LEGACY PERSISTENCE — chart_states (per-user prefs/progress)
+     ───────────────────────────────────────────────────────────────────── */
+
+  function collectUserPrefs() {
+    return {
+      FACULTY_PROGRESS:    window.FACULTY_PROGRESS    || {},
+      SUBMITTED_CHARTS:    window.SUBMITTED_CHARTS    || {},
+      DEBRIEF_SUBMITTED:   window.DEBRIEF_SUBMITTED   || {},
+      SAMPLE_NOTES_LOADED: window.SAMPLE_NOTES_LOADED || false,
+      IMG_UPLOAD_DATA:     window.IMG_UPLOAD_DATA     || {}
+    };
+  }
+
+  async function saveUserPrefs() {
     if (DEMO || !hctSession || saving) return;
-    var str = safeStr(collectState());
-    if (!str) return;
-    if (!force && str === lastSavedState) return;
+    var str = safeStr(collectUserPrefs());
+    if (!str || str === lastSavedState) return;
     saving = true;
-    setSyncBadge('saving');
     try {
       var res = await sb.from('chart_states').upsert({
         user_id: hctSession.user.id,
         state: JSON.parse(str),
         updated_at: new Date().toISOString()
       }, { onConflict: 'user_id' });
-      if (res.error) console.warn('[HCT] autosave error:', res.error.message);
-      else { lastSavedState = str; setSyncBadge('saved'); }
-    } catch (e) { console.warn('[HCT] autosave failed:', e); }
+      if (res.error) console.warn('[HCT] prefs save error:', res.error.message);
+      else lastSavedState = str;
+    } catch(e) { console.warn('[HCT] prefs save failed:', e); }
     finally { saving = false; }
   }
 
-  async function loadChartState() {
-    if (DEMO || !hctSession) return;
+  async function loadUserPrefs() {
+    if (DEMO || !hctSession || !sb) return;
     try {
       var res = await sb.from('chart_states')
         .select('state').eq('user_id', hctSession.user.id).maybeSingle();
-      if (res.error) { console.warn('[HCT] load state error:', res.error.message); return; }
-      if (res.data && res.data.state) {
-        applyState(res.data.state);
-        lastSavedState = safeStr(collectState());
-      }
-    } catch (e) { console.warn('[HCT] load state failed:', e); }
+      if (res.error || !res.data || !res.data.state) return;
+      var s = res.data.state;
+      ['FACULTY_PROGRESS','SUBMITTED_CHARTS','DEBRIEF_SUBMITTED',
+       'SAMPLE_NOTES_LOADED','IMG_UPLOAD_DATA'].forEach(function(k) {
+        if (s[k] !== undefined) window[k] = s[k];
+      });
+    } catch(e) { console.warn('[HCT] load user prefs failed:', e); }
+  }
+
+  function safeStr(obj) {
+    try { return JSON.stringify(obj); } catch(e) { return null; }
   }
 
   function flushOnHide() {
     if (DEMO || !hctSession) return;
-    var str = safeStr(collectState());
+    var str = safeStr(collectUserPrefs());
     if (!str || str === lastSavedState) return;
-    var body = JSON.stringify([{
-      user_id: hctSession.user.id,
-      state: JSON.parse(str),
-      updated_at: new Date().toISOString()
-    }]);
     try {
       fetch(CFG.SUPABASE_URL + '/rest/v1/chart_states?on_conflict=user_id', {
-        method: 'POST', keepalive: body.length < 60000,
+        method: 'POST', keepalive: str.length < 60000,
         headers: {
           'apikey': CFG.SUPABASE_ANON_KEY,
           'Authorization': 'Bearer ' + hctSession.access_token,
           'Content-Type': 'application/json',
           'Prefer': 'resolution=merge-duplicates'
         },
-        body: body
+        body: JSON.stringify([{
+          user_id: hctSession.user.id,
+          state: JSON.parse(str),
+          updated_at: new Date().toISOString()
+        }])
       });
       lastSavedState = str;
-    } catch (e) {}
+    } catch(e){}
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     2. TRUE REAL-TIME SYNC — broadcast channel
-     Every 2 s we diff the current state against our last broadcast snapshot.
-     Changed patient data is sent as individual payloads over the WebSocket
-     broadcast channel. Other devices receive and apply changes instantly.
+     5. TRUE REAL-TIME BROADCAST — 100 ms diff cycle
      ───────────────────────────────────────────────────────────────────── */
 
   function initBroadcastSnap() {
-    // Seed the snapshot so the first broadcast doesn't re-send existing data
-    PER_PATIENT_STORES.forEach(function (key) {
+    PER_PATIENT_STORES.forEach(function(key) {
       lastBroadcastSnap[key] = {};
       var store = window[key];
       if (!store || typeof store !== 'object') return;
-      Object.keys(store).forEach(function (pxId) {
-        try { lastBroadcastSnap[key][pxId] = JSON.stringify(store[pxId]); } catch (e) {}
+      Object.keys(store).forEach(function(pxId) {
+        try { lastBroadcastSnap[key][pxId] = JSON.stringify(store[pxId]); } catch(e){}
       });
     });
-    PATIENT_LIST_STORES.concat(FLAT_STORES).concat(ARRAY_STORES).forEach(function (key) {
-      try { lastBroadcastSnap['__' + key] = JSON.stringify(window[key]); } catch (e) {}
+    PATIENT_LIST_STORES.concat(FLAT_STORES).concat(ARRAY_STORES).forEach(function(key) {
+      try { lastBroadcastSnap['__' + key] = JSON.stringify(window[key]); } catch(e){}
+    });
+    PER_PATIENT_STORES.forEach(function(key) {
+      var store = window[key];
+      if (!store) return;
+      Object.keys(store).forEach(function(pxId) {
+        try { lastSharedSnap[key + '|' + pxId] = JSON.stringify(store[pxId]); } catch(e){}
+      });
+    });
+    FLAT_STORES.concat(ARRAY_STORES).forEach(function(key) {
+      try { lastSharedSnap[key + '|__global'] = JSON.stringify(window[key]); } catch(e){}
     });
   }
 
@@ -234,46 +574,42 @@
     if (!liveChannel) return false;
     try {
       var str = JSON.stringify(payload);
-      if (str.length > 28000) return false; // Supabase broadcast limit ~32 KB
+      if (str.length > 28000) return false;
       liveChannel.send({ type: 'broadcast', event: 'chart_change', payload: payload });
       return true;
-    } catch (e) { return false; }
+    } catch(e) { return false; }
   }
 
   function mkPayload(storeKey, pxId, data) {
     return {
       u:  hctSession.user.id,
-      un: hctProfile ? (hctProfile.full_name || 'A user') : 'A user',
+      un: hctProfile ? (hctProfile.full_name || 'User') : 'User',
       ur: hctProfile ? (hctProfile.role || 'student') : 'student',
-      k:  storeKey,
-      px: pxId || null,
-      d:  data,
-      t:  Date.now()
+      k:  storeKey, px: pxId || null, d: data, t: Date.now()
     };
   }
 
   function broadcastChanges() {
     if (DEMO || !liveChannel || !hctSession || !hctProfile) return;
+    var hadChanges = false;
 
-    // Per-patient stores
-    PER_PATIENT_STORES.forEach(function (key) {
+    PER_PATIENT_STORES.forEach(function(key) {
       var store = window[key];
       if (!store || typeof store !== 'object') return;
       if (!lastBroadcastSnap[key]) lastBroadcastSnap[key] = {};
-
-      Object.keys(store).forEach(function (pxId) {
+      Object.keys(store).forEach(function(pxId) {
         try {
           var curr = JSON.stringify(store[pxId]);
           if (curr === lastBroadcastSnap[key][pxId]) return;
           if (safeSend(mkPayload(key, pxId, store[pxId]))) {
             lastBroadcastSnap[key][pxId] = curr;
+            hadChanges = true;
           }
-        } catch (e) {}
+        } catch(e){}
       });
     });
 
-    // Patient-list stores
-    PATIENT_LIST_STORES.forEach(function (key) {
+    PATIENT_LIST_STORES.forEach(function(key) {
       var store = window[key];
       if (!store) return;
       try {
@@ -281,12 +617,12 @@
         if (curr === lastBroadcastSnap['__' + key]) return;
         if (safeSend(mkPayload(key, null, store))) {
           lastBroadcastSnap['__' + key] = curr;
+          hadChanges = true;
         }
-      } catch (e) {}
+      } catch(e){}
     });
 
-    // Flat object stores
-    FLAT_STORES.forEach(function (key) {
+    FLAT_STORES.forEach(function(key) {
       var store = window[key];
       if (!store) return;
       try {
@@ -294,12 +630,12 @@
         if (curr === lastBroadcastSnap['__' + key]) return;
         if (safeSend(mkPayload(key, null, store))) {
           lastBroadcastSnap['__' + key] = curr;
+          hadChanges = true;
         }
-      } catch (e) {}
+      } catch(e){}
     });
 
-    // Array stores (GLOBAL_ALERTS)
-    ARRAY_STORES.forEach(function (key) {
+    ARRAY_STORES.forEach(function(key) {
       var store = window[key];
       if (!Array.isArray(store) || !store.length) return;
       try {
@@ -307,122 +643,103 @@
         if (curr === lastBroadcastSnap['__' + key]) return;
         if (safeSend(mkPayload(key, null, store))) {
           lastBroadcastSnap['__' + key] = curr;
+          hadChanges = true;
         }
-      } catch (e) {}
+      } catch(e){}
     });
+
+    if (hadChanges) {
+      setSyncBadge('saving');
+      saveSharedState().then(function() { setSyncBadge('saved'); });
+    }
   }
+
+  window.hctFlushNow = function() {
+    try { broadcastChanges(); } catch(e){}
+  };
 
   function handleIncomingChange(p) {
     if (!p || !p.k) return;
-    if (p.u === (hctSession && hctSession.user.id)) return; // own echo
+    if (p.u === (hctSession && hctSession.user.id)) return;
 
-    var key      = p.k;
-    var pxId     = p.px;
-    var data     = p.d;
+    var key = p.k, pxId = p.px, data = p.d;
     var userName = p.un || 'Another user';
     if (data === undefined || data === null) return;
 
-    var changed  = false;
+    var changed = false;
     var notifyPxName = '';
 
-    // ── Per-patient store ──────────────────────────────────────────
     if (pxId && PER_PATIENT_STORES.indexOf(key) >= 0) {
       var store = window[key] || {};
       store[pxId] = data;
       window[key] = store;
       if (!lastBroadcastSnap[key]) lastBroadcastSnap[key] = {};
-      try { lastBroadcastSnap[key][pxId] = JSON.stringify(data); } catch (e) {}
+      try { lastBroadcastSnap[key][pxId] = JSON.stringify(data); } catch(e){}
+      try { lastSharedSnap[key + '|' + pxId] = JSON.stringify(data); } catch(e){}
       changed = true;
       notifyPxName = findPxName(pxId);
-      if (notifyPxName === pxId) notifyPxName = '';
-
-      // Re-evaluate clinical alerts when vitals or screenings change
       if (ALERT_TRIGGER_STORES[key] && typeof checkAndFireAlerts === 'function') {
-        try { checkAndFireAlerts(pxId); } catch (e) {}
+        try { checkAndFireAlerts(pxId); } catch(e){}
       }
-    }
-
-    // ── Patient-list stores ────────────────────────────────────────
-    else if (PATIENT_LIST_STORES.indexOf(key) >= 0) {
+    } else if (PATIENT_LIST_STORES.indexOf(key) >= 0) {
       var local = window[key] || {};
-      var prevTotal = 0, newTotal = 0;
-      Object.keys(local).forEach(function (w) { prevTotal += (local[w] || []).length; });
-
-      Object.keys(data).forEach(function (ward) {
+      Object.keys(data).forEach(function(ward) {
         var extArr = data[ward] || [];
         if (!extArr.length) return;
         if (!local[ward]) local[ward] = [];
         var idxMap = {};
-        local[ward].forEach(function (p, i) { idxMap[p.id] = i; });
-        extArr.forEach(function (ep) {
-          if (idxMap[ep.id] === undefined) { local[ward].push(ep); idxMap[ep.id] = local[ward].length - 1; }
+        local[ward].forEach(function(p, i) { idxMap[p.id] = i; });
+        extArr.forEach(function(ep) {
+          if (idxMap[ep.id] === undefined) { local[ward].push(ep); }
           else local[ward][idxMap[ep.id]] = ep;
         });
-        newTotal += local[ward].length;
       });
       window[key] = local;
-      try { lastBroadcastSnap['__' + key] = JSON.stringify(local); } catch (e) {}
+      try { lastBroadcastSnap['__' + key] = JSON.stringify(local); } catch(e){}
       changed = true;
-
-      if (newTotal > prevTotal) {
-        // Newly admitted patient — grab their name
-        var allPx = [];
-        Object.values(local).forEach(function (arr) { allPx = allPx.concat(arr || []); });
-        var newest = allPx[allPx.length - 1];
-        notifyPxName = newest ? newest.name : '';
-      }
-    }
-
-    // ── Flat object stores ─────────────────────────────────────────
-    else if (FLAT_STORES.indexOf(key) >= 0) {
+      var newest = null;
+      Object.values(local).forEach(function(arr) {
+        if (arr.length) newest = arr[arr.length - 1];
+      });
+      if (newest) notifyPxName = newest.name;
+    } else if (FLAT_STORES.indexOf(key) >= 0) {
       window[key] = Object.assign({}, window[key] || {}, data);
-      try { lastBroadcastSnap['__' + key] = JSON.stringify(window[key]); } catch (e) {}
+      try { lastBroadcastSnap['__' + key] = JSON.stringify(window[key]); } catch(e){}
       changed = true;
-    }
-
-    // ── Array stores (GLOBAL_ALERTS) ──────────────────────────────
-    else if (ARRAY_STORES.indexOf(key) >= 0 && Array.isArray(data)) {
+    } else if (ARRAY_STORES.indexOf(key) >= 0 && Array.isArray(data)) {
       var localArr = window[key] || [];
-      var localKeys = localArr.map(function (a) { return (a.msg||'')+'|'+(a.pxId||''); });
-      var newOnes = data.filter(function (a) {
+      var localKeys = localArr.map(function(a){ return (a.msg||'')+'|'+(a.pxId||''); });
+      var newOnes = data.filter(function(a){
         return localKeys.indexOf((a.msg||'')+'|'+(a.pxId||'')) < 0;
       });
       if (newOnes.length) {
         window[key] = localArr.concat(newOnes);
-        try { lastBroadcastSnap['__' + key] = JSON.stringify(window[key]); } catch (e) {}
+        try { lastBroadcastSnap['__' + key] = JSON.stringify(window[key]); } catch(e){}
         changed = true;
       }
     }
 
     if (!changed) return;
-
-    // Re-render all views
-    try { if (typeof init === 'function') init(); } catch (e) {}
+    try { if (typeof init === 'function') init(); } catch(e){}
     setSyncBadge('saved');
 
-    // Toast notification
     if (NOTIFY_STORES[key]) {
       var label   = STORE_LABELS[key] || key;
       var isAlert = (key === 'ALERT_STORE' || key === 'GLOBAL_ALERTS');
       var roleTag = p.ur === 'faculty' ? 'Faculty' : (p.ur === 'admin' ? 'Admin' : 'Nurse');
       var who     = userName + ' (' + roleTag + ')';
-
       var msg;
       if (key === 'PATIENTS' || key === 'OPD_PATIENTS' || key === 'LTC_PATIENTS') {
-        msg = notifyPxName
-          ? who + ' admitted ' + notifyPxName
-          : who + ' updated ' + label;
+        msg = notifyPxName ? who + ' admitted ' + notifyPxName : who + ' updated ' + label;
       } else {
         msg = who + ' updated ' + label + (notifyPxName ? ' for ' + notifyPxName : '');
       }
-
       showLiveToast(msg, isAlert ? 'alert' : 'info');
     }
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     3. TOAST NOTIFICATION SYSTEM
-     Stacks up to 4 toasts in the bottom-right corner, auto-dismisses after 5 s.
+     6. TOAST NOTIFICATION SYSTEM
      ───────────────────────────────────────────────────────────────────── */
   function showLiveToast(msg, type) {
     var container = document.getElementById('hct-toast-container');
@@ -432,21 +749,17 @@
       container.style.cssText =
         'position:fixed;bottom:18px;right:18px;z-index:99999;' +
         'display:flex;flex-direction:column-reverse;gap:8px;' +
-        'pointer-events:none;max-width:310px;';
+        'pointer-events:none;max-width:320px;';
       document.body.appendChild(container);
     }
-
-    // Limit stack to 4 toasts
     while (container.children.length >= 4) {
       var oldest = container.lastChild;
       if (oldest) container.removeChild(oldest);
     }
-
     var isAlert = (type === 'alert');
     var bg      = isAlert ? '#7A1F23' : '#1B2A4A';
     var icon    = isAlert ? '⚠' : '⟳';
-
-    var toast = document.createElement('div');
+    var toast   = document.createElement('div');
     toast.style.cssText =
       'background:' + bg + ';color:#fff;padding:10px 13px;border-radius:10px;' +
       'font-family:"DM Sans",sans-serif;font-size:12px;line-height:1.45;' +
@@ -457,30 +770,26 @@
     toast.innerHTML =
       '<span style="font-size:14px;flex-shrink:0;margin-top:1px">' + icon + '</span>' +
       '<span>' + esc(msg) + '</span>';
-    toast.onclick = function () { dismissToast(toast); };
-
+    toast.onclick = function() { dismissToast(toast); };
     container.prepend(toast);
-
-    requestAnimationFrame(function () {
-      requestAnimationFrame(function () {
-        toast.style.opacity  = '1';
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        toast.style.opacity   = '1';
         toast.style.transform = 'translateX(0)';
       });
     });
-
-    var ttl = isAlert ? 8000 : 5000;
-    setTimeout(function () { dismissToast(toast); }, ttl);
+    setTimeout(function() { dismissToast(toast); }, isAlert ? 8000 : 5000);
   }
 
   function dismissToast(toast) {
     if (!toast || !toast.parentNode) return;
     toast.style.opacity   = '0';
     toast.style.transform = 'translateX(18px)';
-    setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 240);
+    setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 240);
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     4. LIVE CHANNEL + FALLBACKS
+     7. LIVE CHANNEL + POSTGRES_CHANGES SUBSCRIPTIONS
      ───────────────────────────────────────────────────────────────────── */
 
   function subscribeLiveChannel() {
@@ -490,97 +799,120 @@
       liveChannel = sb.channel('hct-ehr-live', {
         config: { broadcast: { self: false } }
       })
-      .on('broadcast', { event: 'chart_change' }, function (msg) {
+      .on('broadcast', { event: 'chart_change' }, function(msg) {
         handleIncomingChange(msg.payload);
       })
-      .subscribe(function (status) {
-        if (status === 'SUBSCRIBED') console.log('[HCT] Live broadcast channel connected');
-        if (status === 'CHANNEL_ERROR') console.warn('[HCT] Live channel error — using poll fallback');
+      .subscribe(function(status) {
+        if (status === 'SUBSCRIBED') console.log('[HCT] Live channel connected');
+        if (status === 'CHANNEL_ERROR') console.warn('[HCT] Live channel error');
       });
-    } catch (e) { console.warn('[HCT] Live channel setup failed:', e); }
+    } catch(e) { console.warn('[HCT] Live channel setup failed:', e); }
   }
 
-  function subscribeToRealtime() {
+  function subscribeDBChanges() {
     if (DEMO || !sb || !hctSession) return;
     try {
-      if (realtimeChannel) { sb.removeChannel(realtimeChannel); realtimeChannel = null; }
-      realtimeChannel = sb.channel('hct-ehr-db')
+      if (dbChannel) { sb.removeChannel(dbChannel); dbChannel = null; }
+      dbChannel = sb.channel('hct-ehr-db-v2')
         .on('postgres_changes', {
-          event: 'UPDATE', schema: 'public', table: 'chart_states'
-        }, function (payload) {
-          if (payload.new && payload.new.user_id !== hctSession.user.id && payload.new.state) {
-            mergeExternalState(payload.new.state);
-          }
-        })
-        .subscribe();
-    } catch (e) { console.warn('[HCT] postgres_changes fallback failed:', e); }
-  }
-
-  async function fetchAndMergeOtherStates() {
-    if (DEMO || !hctSession || !sb) return;
-    try {
-      var res = await sb.from('chart_states')
-        .select('user_id, state, updated_at')
-        .neq('user_id', hctSession.user.id);
-      if (res.error) return;
-      (res.data || []).forEach(function (row) {
-        if (row.state) mergeExternalState(row.state);
-      });
-    } catch (e) { console.warn('[HCT] poll merge failed:', e); }
-  }
-
-  // Full state merge used by postgres_changes + poll fallbacks
-  function mergeExternalState(remote) {
-    if (!remote) return;
-    var changed = false;
-
-    PATIENT_LIST_STORES.forEach(function (key) {
-      var local = window[key] || {};
-      var ext   = remote[key] || {};
-      Object.keys(ext).forEach(function (ward) {
-        var extArr = ext[ward] || [];
-        if (!extArr.length) return;
-        if (!local[ward]) local[ward] = [];
-        var idxMap = {};
-        local[ward].forEach(function (p, i) { idxMap[p.id] = i; });
-        extArr.forEach(function (ep) {
-          if (idxMap[ep.id] === undefined) { local[ward].push(ep); changed = true; }
-          else { local[ward][idxMap[ep.id]] = ep; changed = true; }
+          event: 'INSERT', schema: 'public', table: 'shared_ehr_state'
+        }, handleSharedStateChange)
+        .on('postgres_changes', {
+          event: 'UPDATE', schema: 'public', table: 'shared_ehr_state'
+        }, handleSharedStateChange)
+        .on('postgres_changes', {
+          event: 'INSERT', schema: 'public', table: 'ehr_patients'
+        }, handlePatientDBChange)
+        .on('postgres_changes', {
+          event: 'UPDATE', schema: 'public', table: 'ehr_patients'
+        }, handlePatientDBChange)
+        .on('postgres_changes', {
+          event: 'INSERT', schema: 'public', table: 'ehr_notifications'
+        }, handleNotificationDBChange)
+        .subscribe(function(status) {
+          if (status === 'SUBSCRIBED') console.log('[HCT] DB changes channel connected');
+          if (status === 'CHANNEL_ERROR') console.warn('[HCT] DB changes error');
         });
-      });
-      window[key] = local;
-    });
+    } catch(e) { console.warn('[HCT] DB changes setup failed:', e); }
+  }
 
-    FLAT_STORES.forEach(function (key) {
-      if (remote[key]) { window[key] = Object.assign({}, remote[key], window[key] || {}); changed = true; }
-    });
+  function handleSharedStateChange(payload) {
+    var row = payload.new || payload.record;
+    if (!row) return;
+    if (row.updated_by === (hctSession && hctSession.user.id)) return;
+    applySharedRow(row.state_key, row.px_id, row.data);
+    try { lastSharedSnap[row.state_key + '|' + row.px_id] = JSON.stringify(row.data); } catch(e){}
+    try { if (typeof init === 'function') init(); } catch(e){}
+    setSyncBadge('saved');
+    var label = STORE_LABELS[row.state_key] || row.state_key;
+    var who   = row.updated_by_name || 'Another user';
+    if (NOTIFY_STORES[row.state_key]) {
+      var pxName = row.px_id && row.px_id !== '__global' ? findPxName(row.px_id) : '';
+      showLiveToast(who + ' updated ' + label + (pxName ? ' for ' + pxName : ''), 'info');
+      if (ALERT_TRIGGER_STORES[row.state_key] && row.px_id && row.px_id !== '__global') {
+        try { if (typeof checkAndFireAlerts === 'function') checkAndFireAlerts(row.px_id); } catch(e){}
+      }
+    }
+  }
 
-    PER_PATIENT_STORES.forEach(function (key) {
-      var local = window[key] || {};
-      var ext   = remote[key] || {};
-      Object.keys(ext).forEach(function (pxId) {
-        if (!local[pxId]) { local[pxId] = ext[pxId]; changed = true; }
-      });
-      window[key] = local;
-    });
+  function handlePatientDBChange(payload) {
+    var row = payload.new || payload.record;
+    if (!row) return;
+    var uid = hctSession && hctSession.user.id;
 
-    if (Array.isArray(remote.GLOBAL_ALERTS) && remote.GLOBAL_ALERTS.length) {
-      var la = window.GLOBAL_ALERTS || [];
-      var lk = la.map(function (a) { return (a.msg||'')+'|'+(a.pxId||''); });
-      var nn = remote.GLOBAL_ALERTS.filter(function (a) {
-        return lk.indexOf((a.msg||'')+'|'+(a.pxId||'')) < 0;
-      });
-      if (nn.length) { window.GLOBAL_ALERTS = la.concat(nn); changed = true; }
+    if (row.is_discharged || row.deleted_at) {
+      var store = row.section_type === 'outpatient' ? window.OPD_PATIENTS
+                : row.section_type === 'ltc'        ? window.LTC_PATIENTS
+                : window.PATIENTS;
+      if (store && store[row.ward]) {
+        store[row.ward] = store[row.ward].filter(function(p){ return p.id !== row.id; });
+      }
+      try { if (typeof init === 'function') init(); } catch(e){}
+      if (row.updated_by !== uid) {
+        showLiveToast(
+          (row.updated_by_name || 'A user') + ' discharged patient ' + (row.name || ''),
+          'info'
+        );
+      }
+      return;
     }
 
-    if (changed) {
-      try { if (typeof init === 'function') init(); } catch (e) {}
-      setSyncBadge('saved');
+    var px    = dbRowToPx(row);
+    var store = row.section_type === 'outpatient' ? window.OPD_PATIENTS
+              : row.section_type === 'ltc'        ? window.LTC_PATIENTS
+              : window.PATIENTS;
+    if (!store[row.ward]) store[row.ward] = [];
+    var idx = store[row.ward].findIndex(function(p){ return p.id === row.id; });
+    if (idx >= 0) store[row.ward][idx] = px;
+    else store[row.ward].push(px);
+
+    try { if (typeof init === 'function') init(); } catch(e){}
+    setSyncBadge('saved');
+    if (row.updated_by !== uid) {
+      showLiveToast(
+        (row.updated_by_name || 'A user') + ' updated patient ' + (row.name || ''),
+        'info'
+      );
     }
+  }
+
+  function handleNotificationDBChange(payload) {
+    var row = payload.new || payload.record;
+    if (!row) return;
+    var uid = hctSession && hctSession.user.id;
+    if (row.created_by === uid) return;
+    injectNotifFromDB(row);
+    updateNotifBadge_safe();
+    renderNotifList_safe();
+    var isAlert = (row.notif_type === 'alert' || row.notif_type === 'warning');
+    showLiveToast(
+      (row.created_by_name || 'A user') + ': ' + row.message,
+      isAlert ? 'alert' : 'info'
+    );
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     5. STUDENT PROGRESS + SUBMISSIONS
+     8. STUDENT PROGRESS + SUBMISSIONS
      ───────────────────────────────────────────────────────────────────── */
   function findPxName(pxId) {
     var pools = [window.PATIENTS, window.OPD_PATIENTS, window.LTC_PATIENTS];
@@ -599,11 +931,11 @@
     if (DEMO || !hctSession || !hctProfile) return;
     var FP = window.FACULTY_PROGRESS || {};
     var rows = [];
-    Object.keys(FP).forEach(function (pxId) {
+    Object.keys(FP).forEach(function(pxId) {
       var byStudent = FP[pxId] || {};
-      Object.keys(byStudent).forEach(function (sId) {
+      Object.keys(byStudent).forEach(function(sId) {
         var prog = byStudent[sId] || {};
-        Object.keys(prog).forEach(function (sec) {
+        Object.keys(prog).forEach(function(sec) {
           rows.push({
             user_id: hctSession.user.id,
             student_no: hctProfile.student_no || sId,
@@ -617,13 +949,13 @@
       });
     });
     if (!rows.length) return;
-    var sig = safeStr(rows.map(function (r) { return [r.px_id, r.section, r.time_ms, r.visits]; }));
+    var sig = safeStr(rows.map(function(r){ return [r.px_id, r.section, r.time_ms, r.visits]; }));
     if (!force && sig === lastSyncedProgress) return;
     try {
       var res = await sb.from('student_progress').upsert(rows, { onConflict: 'user_id,px_id,section' });
       if (!res.error) lastSyncedProgress = sig;
       else console.warn('[HCT] progress sync error:', res.error.message);
-    } catch (e) { console.warn('[HCT] progress sync failed:', e); }
+    } catch(e) { console.warn('[HCT] progress sync failed:', e); }
   }
 
   async function pushSubmission(sub) {
@@ -639,11 +971,11 @@
         submitted_at: sub.ts_iso || new Date().toISOString()
       });
       if (res.error) console.warn('[HCT] submission push error:', res.error.message);
-    } catch (e) { console.warn('[HCT] submission push failed:', e); }
+    } catch(e) { console.warn('[HCT] submission push failed:', e); }
   }
 
   var _origSubmitChart = window.submitChart;
-  window.submitChart = function (pxId) {
+  window.submitChart = function(pxId) {
     if (typeof _origSubmitChart === 'function') _origSubmitChart(pxId);
     try {
       var list = (window.SUBMITTED_CHARTS && window.SUBMITTED_CHARTS[pxId]) || [];
@@ -654,12 +986,12 @@
       }
       pushSubmission(sub);
       syncProgress(true);
-      saveChartState(true);
-    } catch (e) { console.warn('[HCT] submit hook failed:', e); }
+      saveUserPrefs();
+    } catch(e) { console.warn('[HCT] submit hook failed:', e); }
   };
 
   /* ─────────────────────────────────────────────────────────────────────
-     6. AUTHENTICATION
+     9. AUTHENTICATION
      ───────────────────────────────────────────────────────────────────── */
   function $(id) { return document.getElementById(id); }
   function showErr(id, msg)  { var el=$(id); if(el){el.textContent=msg; el.style.display=msg?'block':'none';} }
@@ -674,10 +1006,13 @@
     var name     = hctProfile ? (hctProfile.full_name||'User') : (window.curUserName||'User');
     var roleKey  = hctProfile ? hctProfile.role : (window.curUserRole||'student');
     var isFaculty = roleKey==='faculty'||roleKey==='admin';
+    var isAdmin   = roleKey==='admin';
     window.curUserName  = name;
     window.curUserRole  = isFaculty ? 'faculty' : 'student';
+    window.curIsAdmin   = isAdmin;
     if (hctProfile && hctProfile.student_no) window.curStudentId = hctProfile.student_no;
-    var roleLabel = roleKey==='admin' ? 'Administrator' : (isFaculty ? 'Faculty / Instructor' : 'Student Nurse');
+    var roleLabel = roleKey==='admin' ? 'Administrator'
+                  : isFaculty ? 'Faculty / Instructor' : 'Student Nurse';
     var nameEl = document.querySelector('.tb-user div div:first-child');
     if (nameEl) nameEl.textContent = name;
     var roleEl = document.querySelector('.tb-user div div:last-child');
@@ -686,10 +1021,12 @@
     if (av && name) av.textContent = name.split(' ').map(function(w){return w[0];}).join('').toUpperCase().substring(0,2);
     var facBtn = $('nav-faculty-btn');
     if (facBtn) facBtn.style.display = isFaculty ? '' : 'none';
+    var adminBtn = $('nav-admin-btn');
+    if (adminBtn) adminBtn.style.display = isAdmin ? '' : 'none';
   }
 
   async function fetchOrCreateProfile(user) {
-    var res = await sb.from('profiles').select('*').eq('id',user.id).maybeSingle();
+    var res = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
     if (res.data) return res.data;
     var meta = user.user_metadata || {};
     var prof = {
@@ -699,17 +1036,20 @@
       student_no: meta.student_no || ('S'+user.id.substring(0,6).toUpperCase()),
       email: user.email
     };
-    var ins = await sb.from('profiles').upsert(prof,{onConflict:'id'});
+    var ins = await sb.from('profiles').upsert(prof, { onConflict: 'id' });
     if (ins.error) console.warn('[HCT] profile create error:', ins.error.message);
     return prof;
   }
 
   async function enterApp() {
     applyUserToUI();
-    await loadChartState();
-    await fetchAndMergeOtherStates();   // pull existing data from all users on entry
+    setSyncBadge('saving');
+    await loadPatients();
+    await loadSharedState();
+    await loadNotifications();
+    await loadUserPrefs();
     if (typeof showScreen === 'function') showScreen('s-app');
-    initBroadcastSnap();                // seed snapshot so first broadcast is clean
+    initBroadcastSnap();
     startBackgroundSync();
     setSyncBadge('saved');
   }
@@ -721,46 +1061,45 @@
     if (broadcastTimer) clearInterval(broadcastTimer);
     if (DEMO) return;
 
-    saveTimer      = setInterval(function(){ saveChartState(false); },    10000);
-    progTimer      = setInterval(function(){ syncProgress(false); },      30000);
-    broadcastTimer = setInterval(function(){ broadcastChanges(); },        2000); // <-- real-time diff
-    pollTimer      = setInterval(function(){ fetchAndMergeOtherStates(); },15000); // fallback poll
+    broadcastTimer = setInterval(function(){ broadcastChanges(); },   100);
+    saveTimer      = setInterval(function(){ saveUserPrefs(); },     10000);
+    progTimer      = setInterval(function(){ syncProgress(false); }, 30000);
+    pollTimer      = setInterval(function(){ saveSharedState(); },   15000);
 
     document.addEventListener('visibilitychange', function() {
       if (document.visibilityState === 'hidden') { flushOnHide(); }
       if (document.visibilityState === 'visible') {
-        saveChartState(true);
-        fetchAndMergeOtherStates();
-        initBroadcastSnap(); // re-seed so we don't re-broadcast stale data on wake
+        saveUserPrefs();
+        saveSharedState();
+        initBroadcastSnap();
       }
     });
     window.addEventListener('beforeunload', flushOnHide);
 
-    subscribeLiveChannel();   // instant WebSocket broadcast
-    subscribeToRealtime();    // postgres_changes fallback
+    subscribeLiveChannel();
+    subscribeDBChanges();
   }
 
   window.doLogin = async function() {
-    showErr('auth-error-login','');
+    showErr('auth-error-login', '');
     if (DEMO) { if(typeof window._origDoLogin==='function') window._origDoLogin(); return; }
-    var email = ($('login-email')||{}).value||'';
+    var email = (($('login-email')||{}).value||'').trim();
     var pass  = ($('login-password')||{}).value||'';
-    email = email.trim();
     if (!email||!pass) { showErr('auth-error-login','Please enter your email and password.'); return; }
-    setBusy('login-btn',true,'Sign In','Signing in…');
+    setBusy('login-btn', true, 'Sign In', 'Signing in…');
     try {
-      var res = await sb.auth.signInWithPassword({email:email,password:pass});
-      if (res.error) { showErr('auth-error-login',res.error.message); return; }
+      var res = await sb.auth.signInWithPassword({email:email, password:pass});
+      if (res.error) { showErr('auth-error-login', res.error.message); return; }
       hctSession = res.data.session;
       hctProfile = await fetchOrCreateProfile(res.data.user);
       await enterApp();
     } catch(e) {
       showErr('auth-error-login','Could not reach the server. Check your internet connection.');
-    } finally { setBusy('login-btn',false,'Sign In','Signing in…'); }
+    } finally { setBusy('login-btn', false, 'Sign In', 'Signing in…'); }
   };
 
   window.doSignup = async function() {
-    showErr('auth-error-signup','');
+    showErr('auth-error-signup', '');
     if (DEMO) { if(typeof window._origDoLogin==='function') window._origDoLogin(); return; }
     var f    = (($('reg-fname')||{}).value||'').trim();
     var l    = (($('reg-lname')||{}).value||'').trim();
@@ -769,17 +1108,17 @@
     var role = (($('reg-role')||{}).value||'student');
     var p1   = ($('reg-password')||{}).value||'';
     var p2   = ($('reg-confirm')||{}).value||'';
-    if (!f||!l)    { showErr('auth-error-signup','Please enter your first and last name.'); return; }
-    if (!email)    { showErr('auth-error-signup','Please enter your email address.'); return; }
+    if (!f||!l)     { showErr('auth-error-signup','Please enter your first and last name.'); return; }
+    if (!email)     { showErr('auth-error-signup','Please enter your email address.'); return; }
     if (p1.length<6){ showErr('auth-error-signup','Password must be at least 6 characters.'); return; }
-    if (p1!==p2)   { showErr('auth-error-signup','Passwords do not match.'); return; }
-    setBusy('signup-btn',true,'Create Account','Creating…');
+    if (p1!==p2)    { showErr('auth-error-signup','Passwords do not match.'); return; }
+    setBusy('signup-btn', true, 'Create Account', 'Creating…');
     try {
       var res = await sb.auth.signUp({
         email:email, password:p1,
         options:{data:{full_name:f+' '+l, role:role, student_no:idno||null}}
       });
-      if (res.error) { showErr('auth-error-signup',res.error.message); return; }
+      if (res.error) { showErr('auth-error-signup', res.error.message); return; }
       if (res.data.session) {
         hctSession = res.data.session;
         hctProfile = await fetchOrCreateProfile(res.data.user);
@@ -790,21 +1129,22 @@
       }
     } catch(e) {
       showErr('auth-error-signup','Could not reach the server. Check your internet connection.');
-    } finally { setBusy('signup-btn',false,'Create Account','Creating…'); }
+    } finally { setBusy('signup-btn', false, 'Create Account', 'Creating…'); }
   };
 
   window.hctLogout = async function() {
     try {
       if (!DEMO && hctSession) {
         if (broadcastTimer) clearInterval(broadcastTimer);
-        broadcastChanges(); // final flush of any pending changes
-        await saveChartState(true);
+        broadcastChanges();
+        await saveSharedState();
+        await saveUserPrefs();
         await syncProgress(true);
-        if (liveChannel)     sb.removeChannel(liveChannel);
-        if (realtimeChannel) sb.removeChannel(realtimeChannel);
+        if (liveChannel) sb.removeChannel(liveChannel);
+        if (dbChannel)   sb.removeChannel(dbChannel);
         await sb.auth.signOut();
       }
-    } catch(e) {}
+    } catch(e){}
     location.reload();
   };
 
@@ -812,7 +1152,7 @@
     if (DEMO) {
       var df=$('login-demo-fields'); if(df) df.style.display='';
       var dn=$('login-demo-note');   if(dn) dn.style.display='';
-      var pw=$('login-password');    if(pw) pw.closest('.fg').style.display='none';
+      var pw=$('login-password');    if(pw) pw.closest && pw.closest('.fg') && (pw.closest('.fg').style.display='none');
       return;
     }
     try {
@@ -822,11 +1162,67 @@
         hctProfile = await fetchOrCreateProfile(res.data.session.user);
         await enterApp();
       }
-    } catch(e) { console.warn('[HCT] session restore failed:',e); }
+    } catch(e) { console.warn('[HCT] session restore failed:', e); }
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     7. SYNC STATUS BADGE
+     10. ADMIN — Discharged Patients Panel
+     ───────────────────────────────────────────────────────────────────── */
+
+  window.showDischargedPanel = async function() {
+    var isAdmin = hctProfile && hctProfile.role === 'admin';
+    if (!isAdmin) { alert('Only administrators can view discharged patients.'); return; }
+
+    var existing = $('discharged-modal');
+    if (existing) existing.remove();
+
+    var div = document.createElement('div');
+    div.id  = 'discharged-modal';
+    div.innerHTML =
+      '<div class="fdash-overlay"><div class="fdash-modal" style="max-width:760px">' +
+      '<div class="fdash-hdr">' +
+        '<div class="fdash-title">Discharged Patients</div>' +
+        '<button class="fdash-close" onclick="document.getElementById(\'discharged-modal\').remove()">✕</button>' +
+      '</div>' +
+      '<div class="fdash-body" id="discharged-body"><div class="fdash-loading">Loading…</div></div>' +
+      '</div></div>';
+    document.body.appendChild(div);
+
+    var rows = await window.hctFetchDischargedPatients();
+    var body = $('discharged-body');
+    if (!body) return;
+
+    if (!rows.length) {
+      body.innerHTML = '<div class="fdash-empty">No discharged patients to display.</div>';
+      return;
+    }
+
+    var html = '<div class="fdash-card"><div class="fdash-card-hdr">Discharged Patients (' + rows.length + ')</div>' +
+      '<div class="fdash-table-scroll"><table class="fdash-table">' +
+      '<thead><tr><th>Name</th><th>MRN</th><th>Ward</th><th>Diagnosis</th><th>Discharged</th><th>Action</th></tr></thead><tbody>';
+
+    rows.forEach(function(row) {
+      var dischargeStr = row.discharge_date
+        ? new Date(row.discharge_date).toLocaleString('en-PH',{month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'})
+        : '—';
+      var safeId = String(row.id).replace(/[^a-zA-Z0-9_-]/g,'');
+      html += '<tr>' +
+        '<td><strong>' + esc(row.name) + '</strong></td>' +
+        '<td class="fdash-muted">' + esc(row.mrn||'—') + '</td>' +
+        '<td>' + esc(row.ward||'—') + '</td>' +
+        '<td>' + esc((row.dx||'').substring(0,40) + ((row.dx||'').length>40?'…':'')) + '</td>' +
+        '<td class="fdash-muted">' + esc(dischargeStr) + '</td>' +
+        '<td><button class="fdash-grade-btn" style="background:#16A34A;font-size:11px;padding:5px 12px" ' +
+          'onclick="hctRestorePatient(\'' + safeId + '\').then(function(){document.getElementById(\'discharged-modal\').remove();})">Restore</button>' +
+        '</td></tr>';
+    });
+
+    html += '</tbody></table></div></div>';
+    body.innerHTML = html;
+  };
+
+  /* ─────────────────────────────────────────────────────────────────────
+     11. SYNC STATUS BADGE
      ───────────────────────────────────────────────────────────────────── */
   function setSyncBadge(state) {
     if (DEMO) return;
@@ -845,7 +1241,7 @@
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     8. FACULTY DASHBOARD
+     12. FACULTY DASHBOARD
      ───────────────────────────────────────────────────────────────────── */
   var SECTION_LABELS = {
     'visit-summary':'Visit Summary','vitals':'Vital Signs','mar':'MAR',
@@ -887,7 +1283,7 @@
       });
       var studentsMap={};
       progress.concat(subs).forEach(function(r){if(r.student_no)studentsMap[r.student_no]={student_no:r.student_no,full_name:r.student_name,role:'student'};});
-      return {students:Object.keys(studentsMap).map(function(k){return studentsMap[k];}),progress:progress,submissions:subs};
+      return {students:Object.values(studentsMap),progress:progress,submissions:subs};
     }
     var pr = await Promise.all([
       sb.from('profiles').select('id,full_name,role,student_no,email,created_at').eq('role','student').order('full_name'),
@@ -936,7 +1332,6 @@
     return '<div class="fdash-stat" style="border-top-color:'+(color||'var(--teal)')+'">'+
       '<div class="fdash-stat-val">'+val+'</div><div class="fdash-stat-lbl">'+lbl+'</div></div>';
   }
-
   function groupBy(rows,key){var out={};rows.forEach(function(r){var k=r[key]||'—';(out[k]=out[k]||[]).push(r);});return out;}
 
   function renderOverview() {
@@ -997,7 +1392,7 @@
       html+='<tr><td><strong>'+esc(st.full_name)+'</strong></td><td class="fdash-muted">'+esc(st.student_no||'—')+'</td><td>'+Object.keys(pxSet).length+'</td><td>'+rows.length+'</td><td>'+fmtMin(totalMs)+'</td><td>'+subs.length+'</td><td>'+avg+'</td><td>'+fmtDateShort(last)+'</td></tr>';
       if(rows.length){
         var detail=rows.map(function(r){return esc(secLabel(r.section))+' ('+fmtMin(r.time_ms)+', '+r.visits+'×)';}).join(' · ');
-        html+='<tr class="fdash-detail-row"><td colspan="8">'+esc(st.full_name).split(' ')[0]+'\u2019s sections: '+detail+'</td></tr>';
+        html+='<tr class="fdash-detail-row"><td colspan="8">'+esc(st.full_name).split(' ')[0]+''s sections: '+detail+'</td></tr>';
       }
     });
     html+='</tbody></table></div></div>';
@@ -1037,7 +1432,7 @@
     return html;
   }
 
-  window.fdashSaveGrade = async function(subId,safeId) {
+  window.fdashSaveGrade = async function(subId, safeId) {
     var g=parseInt(($('fdash-grade-'+safeId)||{}).value,10);
     var fb=(($('fdash-fb-'+safeId)||{}).value||'').trim();
     var msg=$('fdash-grade-msg-'+safeId);
@@ -1046,7 +1441,7 @@
     var sub=(_dashData.submissions||[]).filter(function(s){return String(s.id)===String(subId);})[0];
     if(DEMO){
       if(sub){sub.grade=g;sub.feedback=fb;if(sub._demo){sub._demo.grade=g;sub._demo.feedback=fb;}}
-      if(msg)msg.textContent='Saved (demo).';return;
+      if(msg)msg.textContent='Saved (demo).'; return;
     }
     try {
       var res=await sb.from('submissions').update({
@@ -1080,48 +1475,51 @@
     });
     html+='</div></div>';
     var low=secs.slice().reverse().slice(0,3);
-    html+='<div class="fdash-card"><div class="fdash-card-hdr" style="background:#7A1F23">⚠ Areas Needing Improvement (least time spent)</div><div style="padding:14px">';
+    html+='<div class="fdash-card"><div class="fdash-card-hdr" style="background:#7A1F23">⚠ Areas Needing Improvement</div><div style="padding:14px">';
     low.forEach(function(sec){
       html+='<div class="fdash-sub-line"><span style="font-weight:600;color:#B91C1C">'+esc(secLabel(sec))+'</span><span class="fdash-muted">'+fmtMin(totals[sec].time)+' total · '+totals[sec].visits+' visits</span></div>';
     });
-    html+='<div class="fdash-muted" style="margin-top:10px">These sections received the least attention. Consider targeted simulation objectives or pre-briefing emphasis to close these documentation gaps.</div></div></div>';
+    html+='<div class="fdash-muted" style="margin-top:10px">These sections received the least attention from students.</div></div></div>';
     return html;
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     9. MOBILE: off-canvas sidebar
+     13. MOBILE OFF-CANVAS SIDEBAR
      ───────────────────────────────────────────────────────────────────── */
   function setupMobileNav() {
-    var btn=document.createElement('button');
-    btn.id='hct-mobile-nav-btn'; btn.innerHTML='☰ Chart Menu';
-    btn.onclick=function(){
-      var sbar=document.querySelector('.ehr-sidebar');
-      var bd=$('hct-mobile-nav-backdrop');
-      if(sbar) sbar.classList.toggle('mobile-open');
-      if(bd) bd.classList.toggle('show',sbar&&sbar.classList.contains('mobile-open'));
+    var btn = document.createElement('button');
+    btn.id  = 'hct-mobile-nav-btn';
+    btn.innerHTML = '☰ Chart Menu';
+    btn.onclick = function() {
+      var sbar = document.querySelector('.ehr-sidebar');
+      var bd   = $('hct-mobile-nav-backdrop');
+      if (sbar) sbar.classList.toggle('mobile-open');
+      if (bd)   bd.classList.toggle('show', sbar && sbar.classList.contains('mobile-open'));
     };
     document.body.appendChild(btn);
-    var backdrop=document.createElement('div');
-    backdrop.id='hct-mobile-nav-backdrop'; backdrop.onclick=closeMobileNav;
+    var backdrop = document.createElement('div');
+    backdrop.id      = 'hct-mobile-nav-backdrop';
+    backdrop.onclick = closeMobileNav;
     document.body.appendChild(backdrop);
-    document.addEventListener('click',function(ev){
-      if(window.innerWidth>768) return;
-      var t=ev.target;
-      if(t&&(t.classList.contains('nav-child')||(t.classList.contains('nav-item')&&!t.classList.contains('parent')))) closeMobileNav();
+    document.addEventListener('click', function(ev) {
+      if (window.innerWidth > 768) return;
+      var t = ev.target;
+      if (t && (t.classList.contains('nav-child') ||
+         (t.classList.contains('nav-item') && !t.classList.contains('parent')))) closeMobileNav();
     });
   }
-  function closeMobileNav(){
-    var sbar=document.querySelector('.ehr-sidebar');
-    var bd=$('hct-mobile-nav-backdrop');
-    if(sbar) sbar.classList.remove('mobile-open');
-    if(bd) bd.classList.remove('show');
+  function closeMobileNav() {
+    var sbar = document.querySelector('.ehr-sidebar');
+    var bd   = $('hct-mobile-nav-backdrop');
+    if (sbar) sbar.classList.remove('mobile-open');
+    if (bd)   bd.classList.remove('show');
   }
 
   /* ─────────────────────────────────────────────────────────────────────
-     10. INJECTED STYLES
+     14. INJECTED STYLES
      ───────────────────────────────────────────────────────────────────── */
   function injectStyles() {
-    var css=
+    var css =
       '.fdash-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:600;overflow-y:auto;padding:24px 12px}'+
       '.fdash-modal{background:var(--cream,#F8F7F3);max-width:1040px;margin:0 auto;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)}'+
       '.fdash-hdr{background:var(--navy,#1B2A4A);padding:16px 20px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}'+
@@ -1169,8 +1567,8 @@
       '.fdash-bar-fill{height:100%;background:linear-gradient(90deg,var(--teal,#2BBFAD),var(--navy,#1B2A4A));border-radius:5px}'+
       '.fdash-bar-val{font-size:11px;color:var(--text-muted,#6B7280);white-space:nowrap}'+
       '@media(max-width:640px){.fdash-bar-row{grid-template-columns:1fr;gap:4px}.fdash-body{padding:12px}}';
-    var st=document.createElement('style');
-    st.textContent=css;
+    var st = document.createElement('style');
+    st.textContent = css;
     document.head.appendChild(st);
   }
 
@@ -1181,8 +1579,8 @@
     injectStyles();
     setupMobileNav();
     restoreSession();
-    console.log('[HCT] Backend v11 ready — mode: '+(DEMO?'DEMO':'CLOUD + real-time broadcast'));
+    console.log('[HCT] Backend v12 — mode:', DEMO ? 'DEMO (localStorage)' : 'CLOUD + shared real-time tables');
   }
-  if (document.readyState==='loading') document.addEventListener('DOMContentLoaded',boot);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();
