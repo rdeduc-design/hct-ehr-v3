@@ -16705,7 +16705,6 @@ function pushNotif(section, summary, pxId, navKey) {
     window.hctPushNotification(summary, 'info', pxId, section);
   }
 }
-}
 
 function updateNotifBadge() {
   var unread = NOTIF_LOG.filter(function(n){ return !n.read; }).length;
