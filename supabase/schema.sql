@@ -137,10 +137,22 @@ create policy "subs_insert_own"     on public.submissions for insert with check 
 create policy "subs_update_faculty" on public.submissions for update using (public.is_faculty());
 
 -- ════════════════════════════════════════════════════════════════════
--- Done. Next steps:
---   1. (Recommended for class use) Authentication → Sign In / Up →
---      turn OFF "Confirm email" so students can sign in immediately.
---   2. Copy Project URL + anon key into js/config.js.
--- To promote an existing account to faculty, run:
---   update public.profiles set role = 'faculty' where email = 'name@hct.edu.ph';
--- ════════════════════════════════════════════════════════════════════
+-- ── 6. REAL-TIME SYNC ────────────────────────────────────────────────
+-- Allow all authenticated users to read any chart_state (needed for cross-user
+-- patient/data merge). Each user can still only write their own row.
+drop policy if exists "chart_states_all_own" on public.chart_states;
+
+create policy "chart_states_select_authenticated" on public.chart_states
+  for select using (auth.uid() is not null);
+
+create policy "chart_states_insert_own" on public.chart_states
+  for insert with check (auth.uid() = user_id);
+
+create policy "chart_states_update_own" on public.chart_states
+  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create policy "chart_states_delete_own" on public.chart_states
+  for delete using (auth.uid() = user_id);
+
+-- Enable Realtime on chart_states so Supabase broadcasts row changes
+alter publication supabase_realtime add table public.chart_states;
