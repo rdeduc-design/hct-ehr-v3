@@ -1242,7 +1242,7 @@ canvas.lab-canvas{width:100%;height:200px;display:block}
       <div id="sec-wards" class="view active">
         <div class="sec-hdr">
           <div><div class="sec-title">Inpatient Wards</div><div class="sec-sub">Select a ward to view assigned patients</div></div>
-          <button class="btn-new" onclick="openModal()">+ New Admission</button>
+          <button class="btn-new" onclick="openModal('inpatient')">+ New Admission</button>
         </div>
         <div class="card-grid" id="ward-grid"></div>
       </div>
@@ -1257,7 +1257,7 @@ canvas.lab-canvas{width:100%;height:200px;display:block}
             <div class="fc" onclick="filterPx(this,'critical','ward')">Critical</div>
             <div class="fc" onclick="filterPx(this,'isolation','ward')">Isolation</div>
           </div>
-          <button class="btn-new" onclick="openModal()">+ New Admission</button>
+          <button class="btn-new" onclick="openModal('inpatient')">+ New Admission</button>
         </div>
         <div class="px-grid" id="ward-px-grid"></div>
       </div>
@@ -1266,7 +1266,7 @@ canvas.lab-canvas{width:100%;height:200px;display:block}
       <div id="sec-opd" class="view">
         <div class="sec-hdr">
           <div><div class="sec-title">Outpatient Department</div><div class="sec-sub">Select a specialty clinic to view patients</div></div>
-          <button class="btn-new" onclick="openModal()">+ New Admission</button>
+          <button class="btn-new" onclick="openModal('outpatient')">+ New Admission</button>
         </div>
         <div class="card-grid" id="opd-grid"></div>
       </div>
@@ -1279,7 +1279,7 @@ canvas.lab-canvas{width:100%;height:200px;display:block}
             <div class="fc" onclick="filterPx(this,'admitted','opd')">Active</div>
             <div class="fc" onclick="filterPx(this,'discharge','opd')">For Follow-up</div>
           </div>
-          <button class="btn-new" onclick="openModal()">+ New Admission</button>
+          <button class="btn-new" onclick="openModal('outpatient')">+ New Admission</button>
         </div>
         <div class="px-grid" id="opd-px-grid"></div>
       </div>
@@ -1288,7 +1288,7 @@ canvas.lab-canvas{width:100%;height:200px;display:block}
       <div id="sec-ltc" class="view">
         <div class="sec-hdr">
           <div><div class="sec-title">Long-Term Care</div><div class="sec-sub">Select a wing to view residents</div></div>
-          <button class="btn-new" onclick="openModal()">+ New Admission</button>
+          <button class="btn-new" onclick="openModal('ltc')">+ New Admission</button>
         </div>
         <div class="card-grid" id="ltc-grid"></div>
       </div>
@@ -1302,7 +1302,7 @@ canvas.lab-canvas{width:100%;height:200px;display:block}
             <div class="fc" onclick="filterPx(this,'critical','ltc')">Needs Monitoring</div>
             <div class="fc" onclick="filterPx(this,'discharge','ltc')">For Discharge</div>
           </div>
-          <button class="btn-new" onclick="openModal()">+ New Admission</button>
+          <button class="btn-new" onclick="openModal('ltc')">+ New Admission</button>
         </div>
         <div class="px-grid" id="ltc-px-grid"></div>
       </div>
@@ -2058,7 +2058,7 @@ function filterDxSuggestions() {
   }).slice(0, 8);
   if (matches.length === 0) { box.style.display = 'none'; return; }
   box.innerHTML = matches.map(function(d) {
-    return '<div onclick="selectDx(' + JSON.stringify(d) + ')" ' +
+        return '<div onclick="selectDx(this.getAttribute(\'data-dx\'))" data-dx="' + escHtml(d) + '" ' +
       'style="padding:9px 14px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);color:var(--text);" ' +
       'onmouseover="this.style.background=\'var(--cream)\'" onmouseout="this.style.background=\'#fff\'">' +
       escHtml(d) + '</div>';
@@ -2094,7 +2094,7 @@ function filterDxModal() {
     return d.toLowerCase().indexOf(q) >= 0;
   }) : COMMON_DIAGNOSES;
   list.innerHTML = filtered.map(function(d) {
-    return '<div onclick="selectDxFromModal(' + JSON.stringify(d) + ')" ' +
+    return '<div onclick="selectDxFromModal(this.getAttribute(\'data-dx\'))" data-dx="' + escHtml(d) + '" ' +
       'style="padding:10px 16px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);color:var(--text);" ' +
       'onmouseover="this.style.background=\'var(--cream)\'" onmouseout="this.style.background=\'#fff\'">' +
       escHtml(d) + '</div>';
@@ -2258,7 +2258,7 @@ function renderWardPx(wardId,filter){
   var px=PATIENTS[wardId]||[];
   var filtered=filter==='all'?px:px.filter(function(p){return p.status===filter;});
   var g=document.getElementById('ward-px-grid');
-  var naCard='<div class="new-adm-card" onclick="openModal()"><div class="na-icon" style="font-size:20px;font-weight:700">+</div><div class="na-text">New Admission</div><div class="na-sub">Register a new inpatient</div></div>';
+  var naCard='<div class="new-adm-card" onclick="openModal(\'inpatient\')"><div class="na-icon" style="font-size:20px;font-weight:700">+</div><div class="na-text">New Admission</div><div class="na-sub">Register a new inpatient</div></div>';
   g.innerHTML=naCard+filtered.map(function(p){return pxCard(p,'ward',wardId);}).join('');
 }
 
@@ -2297,7 +2297,7 @@ function renderOpdPx(clinicId,filter){
   var px=OPD_PATIENTS[clinicId]||[];
   var filtered=filter==='all'?px:px.filter(function(p){return p.status===filter;});
   var g=document.getElementById('opd-px-grid');
-  var naCard='<div class="new-adm-card" onclick="openModal()"><div class="na-icon" style="font-size:20px;font-weight:700">+</div><div class="na-text">New Admission</div><div class="na-sub">Register a new outpatient</div></div>';
+  var naCard='<div class="new-adm-card" onclick="openModal(\'outpatient\')"><div class="na-icon" style="font-size:20px;font-weight:700">+</div><div class="na-text">New Admission</div><div class="na-sub">Register a new outpatient</div></div>';
   g.innerHTML=naCard+filtered.map(function(p){return pxCard(p,'opd',clinicId);}).join('');
 }
 
@@ -2336,7 +2336,7 @@ function renderLtcPx(wingId,filter){
   var px=LTC_PATIENTS[wingId]||[];
   var filtered=filter==='all'?px:px.filter(function(p){return p.status===filter;});
   var g=document.getElementById('ltc-px-grid');
-  var naCard='<div class="new-adm-card" onclick="openModal()"><div class="na-icon" style="font-size:20px;font-weight:700">+</div><div class="na-text">New Admission</div><div class="na-sub">Register a new LTC resident</div></div>';
+  var naCard='<div class="new-adm-card" onclick="openModal(\'ltc\')"><div class="na-icon" style="font-size:20px;font-weight:700">+</div><div class="na-text">New Admission</div><div class="na-sub">Register a new LTC resident</div></div>';
   g.innerHTML=naCard+filtered.map(function(p){return pxCard(p,'ltc',wingId);}).join('');
 }
 
@@ -12085,21 +12085,59 @@ function cGeneric(key,px){
 }
 
 // ─── MODAL ────────────────────────────────────────────────────────────────────
-function openModal(){
-  currentVisitType='inpatient';
-  currentPhotoData=null;
-  document.getElementById('photo-preview').style.display='none';
-  document.getElementById('photo-placeholder').style.display='block';
-  document.getElementById('photo-input').value='';
-  document.getElementById('m-dob').value='';
-  document.getElementById('m-age').value='';
-  document.getElementById('m-ward').value='';
-  document.getElementById('m-room').value='';
-  document.getElementById('m-room').disabled=true;
-  document.getElementById('m-dx').value='';
-  document.getElementById('m-md').value='';
-  document.getElementById('m-admit-date').value=new Date().toISOString().split('T')[0];
-  setVisitType('inpatient',document.querySelector('.vt-tab'));
+function openModal(type) {
+  var vt = type;
+  if (!vt) {
+    if (curTab === 'opd') vt = 'outpatient';
+    else if (curTab === 'ltc') vt = 'ltc';
+    else vt = 'inpatient';
+  }
+  currentVisitType = vt;
+  currentPhotoData = null;
+  document.getElementById('photo-preview').style.display = 'none';
+  document.getElementById('photo-placeholder').style.display = 'block';
+  document.getElementById('photo-input').value = '';
+  document.getElementById('m-dob').value = '';
+  document.getElementById('m-age').value = '';
+  document.getElementById('m-ward').value = '';
+  document.getElementById('m-room').value = '';
+  document.getElementById('m-room').disabled = true;
+  document.getElementById('m-dx').value = '';
+  document.getElementById('m-md').value = '';
+  document.getElementById('m-admit-date').value = new Date().toISOString().split('T')[0];
+
+  // Activate the correct visit-type tab
+  var vtOrder = ['inpatient', 'outpatient', 'ltc', 'runreport'];
+  var tabs = document.querySelectorAll('.vt-tab');
+  var activeTab = tabs[vtOrder.indexOf(vt)];
+  setVisitType(vt, activeTab);
+
+  // Pre-populate ward/clinic/wing based on where the user is
+  if (vt === 'inpatient' && curWard) {
+    document.getElementById('m-ward').value = curWard;
+    onWardChange();
+  }
+  if (vt === 'outpatient' && curOpd) {
+    document.getElementById('m-clinic').value = curOpd;
+  }
+  if (vt === 'ltc' && curLtc) {
+    // Rebuild LTC room select filtered to the current wing only
+    var ltcRoomSel = document.getElementById('m-ltc-room');
+    if (ltcRoomSel) {
+      var ltcWingRooms = {
+        general:    [{v:'ltc-101',l:'Room 101 – General Wing'},{v:'ltc-102',l:'Room 102 – General Wing'},{v:'ltc-103',l:'Room 103 – General Wing'},{v:'ltc-104',l:'Room 104 – General Wing'}],
+        memory:     [{v:'ltc-201',l:'Room 201 – Memory Care'},{v:'ltc-202',l:'Room 202 – Memory Care'},{v:'ltc-203',l:'Room 203 – Memory Care'}],
+        skilled:    [{v:'ltc-301',l:'Room 301 – Skilled Nursing'},{v:'ltc-302',l:'Room 302 – Skilled Nursing'}],
+        palliative: [{v:'ltc-401',l:'Room 401 – Palliative Care'}]
+      };
+      var wingRooms = ltcWingRooms[curLtc];
+      if (wingRooms) {
+        ltcRoomSel.innerHTML = '<option value="">— Select Room —</option>' +
+          wingRooms.map(function(r){return '<option value="'+r.v+'">'+r.l+'</option>';}).join('');
+      }
+    }
+  }
+
   document.getElementById('modal').classList.remove('hidden');
 }
 
