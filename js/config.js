@@ -13,6 +13,6 @@
    the app works fully, but data lives only in the browser session.
    ════════════════════════════════════════════════════════════════════ */
 window.HCT_CONFIG = {
-  SUPABASE_URL: "",        // e.g. "https://abcdefghijklm.supabase.co"
-  SUPABASE_ANON_KEY: ""    // e.g. "eyJhbGciOiJIUzI1NiIsInR5cCI6..."
+  SUPABASE_URL: "https://phzkddxaqgyvsbxgpdce.supabase.co",        // e.g. "https://abcdefghijklm.supabase.co"
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBoemtkZHhhcWd5dnNieGdwZGNlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExMjM3OTIsImV4cCI6MjA5NjY5OTc5Mn0.tpIGUOjgizDenu5lSK9r7G2L9O1UpYFky_cgVV6_rtU"    // e.g. "eyJhbGciOiJIUzI1NiIsInR5cCI6..."
 };
