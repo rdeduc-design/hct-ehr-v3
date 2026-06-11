@@ -1,0 +1,83 @@
+/* ════════════════════════════════════════════════════════════════════
+   HCT EHR — Responsive Overrides (loaded after the app's inline CSS)
+   Tablet ≤ 1024px · Mobile ≤ 768px · Small phones ≤ 480px
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Mobile chart-menu button + backdrop (hidden on desktop) */
+#hct-mobile-nav-btn{
+  display:none;position:fixed;bottom:18px;right:18px;z-index:560;
+  background:var(--navy,#1B2A4A);color:#fff;border:none;border-radius:24px;
+  padding:11px 18px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;
+  box-shadow:0 6px 20px rgba(27,42,74,.35);cursor:pointer;
+}
+#hct-mobile-nav-backdrop{
+  display:none;position:fixed;inset:0;background:rgba(27,42,74,.45);z-index:540;
+}
+#hct-mobile-nav-backdrop.show{display:block}
+
+/* ── Tablet ─────────────────────────────────────────────────────────── */
+@media(max-width:1024px){
+  .view{padding:18px 16px}
+  .auth-brand{width:320px}
+  .auth-card{width:360px;padding:32px}
+}
+
+/* ── Mobile ─────────────────────────────────────────────────────────── */
+@media(max-width:768px){
+  /* Auth screens: stack brand panel above the card */
+  .auth-wrap{flex-direction:column;height:auto;min-height:100vh;overflow-y:auto}
+  .auth-brand{width:100%;padding:28px 20px;flex-shrink:0}
+  .auth-brand .brand-desc{display:none}
+  .auth-area{flex:1;display:flex;align-items:flex-start;justify-content:center;padding:20px 14px 40px}
+  .auth-card{width:100%;max-width:430px;padding:24px 20px}
+  .frow{grid-template-columns:1fr !important;display:grid;gap:0}
+
+  /* Top bar: tighter, hide secondary labels */
+  .top-bar{padding:0 10px;gap:8px;flex-wrap:nowrap;overflow-x:auto}
+  .tb-sub{display:none}
+  .tb-title{font-size:14px;white-space:nowrap}
+  .tb-btn{padding:5px 9px;font-size:11px;white-space:nowrap}
+  .tb-user div{display:none}        /* keep just the avatar circle */
+  .tb-user .tb-avatar{display:flex}
+  #hct-sync-badge{display:none !important}
+
+  /* Main tabs / breadcrumb scroll horizontally instead of wrapping */
+  .main-tabs{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .main-tab{padding:10px 14px;font-size:12px}
+  .bc{overflow-x:auto;white-space:nowrap;padding:8px 14px}
+
+  /* Chart layout: sidebar becomes an off-canvas drawer */
+  .ehr-sidebar{
+    position:fixed;left:-300px;top:var(--hh,56px);bottom:0;width:280px;
+    z-index:550;transition:left .22s ease;box-shadow:4px 0 24px rgba(27,42,74,.18);
+  }
+  .ehr-sidebar.mobile-open{left:0}
+  #hct-mobile-nav-btn{display:block}
+
+  /* Content breathing room */
+  .view{padding:14px 12px}
+  .sec-hdr{flex-direction:column;gap:8px}
+  .sec-title{font-size:18px}
+
+  /* Generic wide tables scroll instead of breaking layout */
+  .faculty-progress-table,.fdash-table{display:table;min-width:560px}
+  .lab-table-wrap,.mar-grid-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+  /* Cards/grids collapse to single column */
+  .faculty-stat-grid{grid-template-columns:repeat(2,1fr)}
+}
+
+/* ── Small phones ───────────────────────────────────────────────────── */
+@media(max-width:480px){
+  /* 16px inputs prevent iOS auto-zoom on focus */
+  input,select,textarea{font-size:16px !important}
+  .auth-card h2{font-size:20px}
+  .faculty-stat-grid,.fdash-stat-grid{grid-template-columns:repeat(2,1fr)}
+  .view{padding:12px 10px}
+  #hct-mobile-nav-btn{bottom:14px;right:14px;padding:10px 15px;font-size:12px}
+}
+
+/* ── Print: never print the mobile chrome ───────────────────────────── */
+@media print{
+  #hct-mobile-nav-btn,#hct-mobile-nav-backdrop,#hct-sync-badge{display:none !important}
+}
