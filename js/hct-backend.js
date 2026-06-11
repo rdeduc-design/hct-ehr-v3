@@ -93,7 +93,8 @@
     ALLERGIES:'Allergies', ADM_INFO_STORE:'Admission Information',
     HPI_STORE:'History of Present Illness', PMSH_STORE:'Past Medical History',
     CAREPLAN_STORE:'Care Plan', SBAR_STORE:'SBAR Communication',
-    LAB_DATA:'Laboratory Results', IMAGING_STORE:'Imaging / Radiology',
+    LAB_DATA:'Laboratory Results', PANELS_STORE:'Lab Panels',
+    IMAGING_STORE:'Imaging / Radiology',
     BB_STORE:'Blood Bank', MICRO_STORE:'Microbiology', FLOWSHEET_STORE:'Flowsheet',
     IO_ENTRIES:'Intake & Output', IMMUNIZATIONS:'Immunizations',
     EHR_STORE:'Chart Entry', SCR_ENTRIES:'Screening Results',
@@ -104,7 +105,7 @@
 
   var NOTIFY_STORES = {
     VS_DATA:1, NOTES_STORE:1, MAR_MEDS:1, MAR_HISTORY:1, PROB_LIST_STORE:1,
-    ALLERGIES:1, CAREPLAN_STORE:1, SBAR_STORE:1, LAB_DATA:1, IMAGING_STORE:1,
+    ALLERGIES:1, CAREPLAN_STORE:1, SBAR_STORE:1, LAB_DATA:1, PANELS_STORE:1, IMAGING_STORE:1,
     SCR_ENTRIES:1, ALERT_STORE:1, GLOBAL_ALERTS:1,
     PATIENTS:1, OPD_PATIENTS:1, LTC_PATIENTS:1
   };
@@ -210,77 +211,62 @@
      ───────────────────────────────────────────────────────────────────── */
 
   async function loadPatients() {
-  if (DEMO || !sb) return;
-  try {
-    var res = await sb.from('ehr_patients')
-      .select('*')
-      .is('deleted_at', null)
-      .eq('is_discharged', false)
-      .order('admitted_at', { ascending: true });
-
-    if (res.error) {
-      console.warn('[HCT] load patients error:', res.error.message);
-      return;
-    }
-
-    var rows = res.data || [];
-
-    if (!rows.length) {
-      var anyRes = await sb.from('ehr_patients')
-        .select('id')
+    if (DEMO || !sb) return;
+    try {
+      var res = await sb.from('ehr_patients')
+        .select('*')
         .is('deleted_at', null)
-        .limit(1);
-
-      if (!anyRes.error && (!anyRes.data || anyRes.data.length === 0)) {
-        await seedDefaultPatients();
-
-        res = await sb.from('ehr_patients')
-          .select('*')
+        .eq('is_discharged', false)
+        .order('admitted_at', { ascending: true });
+      if (res.error) { console.warn('[HCT] load patients error:', res.error.message); return; }
+      var rows = res.data || [];
+      if (!rows.length) {
+        var anyRes = await sb.from('ehr_patients')
+          .select('id')
           .is('deleted_at', null)
-          .eq('is_discharged', false)
-          .order('admitted_at', { ascending: true });
-
-        rows = res.data || [];
+          .limit(1);
+        if (!anyRes.error && (!anyRes.data || anyRes.data.length === 0)) {
+          await seedDefaultPatients();
+          res = await sb.from('ehr_patients')
+            .select('*')
+            .is('deleted_at', null)
+            .eq('is_discharged', false)
+            .order('admitted_at', { ascending: true });
+          if (res.error) { console.warn('[HCT] reload patients error:', res.error.message); return; }
+          rows = res.data || [];
+        }
       }
-    }
-
-    applyPatientRows(rows);
-  } catch(e) {
-    console.warn('[HCT] load patients failed:', e);
+      applyPatientRows(rows);
+    } catch(e) { console.warn('[HCT] load patients failed:', e); }
   }
-}
 
-function applyPatientRows(rows) {
-  var newPATIENTS = {};
-  var newOPD = {};
-  var newLTC = {};
+  function applyPatientRows(rows) {
+    var newPATIENTS     = {};
+    var newOPD          = {};
+    var newLTC          = {};
+    rows.forEach(function(row) {
+      var px = dbRowToPx(row);
+      if (row.section_type === 'outpatient') {
+        if (!newOPD[row.ward]) newOPD[row.ward] = [];
+        newOPD[row.ward].push(px);
+      } else if (row.section_type === 'ltc') {
+        if (!newLTC[row.ward]) newLTC[row.ward] = [];
+        newLTC[row.ward].push(px);
+      } else {
+        if (!newPATIENTS[row.ward]) newPATIENTS[row.ward] = [];
+        newPATIENTS[row.ward].push(px);
+      }
+    });
+    replacePxStore(window.PATIENTS,     newPATIENTS);
+    replacePxStore(window.OPD_PATIENTS, newOPD);
+    replacePxStore(window.LTC_PATIENTS, newLTC);
+  }
 
-  rows.forEach(function(row) {
-    var px = dbRowToPx(row);
-    if (row.section_type === 'outpatient') {
-      if (!newOPD[row.ward]) newOPD[row.ward] = [];
-      newOPD[row.ward].push(px);
-    } else if (row.section_type === 'ltc') {
-      if (!newLTC[row.ward]) newLTC[row.ward] = [];
-      newLTC[row.ward].push(px);
-    } else {
-      if (!newPATIENTS[row.ward]) newPATIENTS[row.ward] = [];
-      newPATIENTS[row.ward].push(px);
-    }
-  });
-
-  replacePxStore(window.PATIENTS, newPATIENTS);
-  replacePxStore(window.OPD_PATIENTS, newOPD);
-  replacePxStore(window.LTC_PATIENTS, newLTC);
-
-  try { if (typeof init === 'function') init(); } catch(e) {}
-}
-
-function replacePxStore(dest, incoming) {
-  if (!dest) return;
-  Object.keys(dest).forEach(function(k) { delete dest[k]; });
-  Object.keys(incoming).forEach(function(k) { dest[k] = incoming[k]; });
-}
+  function replacePxStore(dest, incoming) {
+    if (!dest) return;
+    Object.keys(dest).forEach(function(ward) { delete dest[ward]; });
+    Object.keys(incoming).forEach(function(ward) { dest[ward] = incoming[ward]; });
+  }
 
   function dbRowToPx(row) {
     return {
@@ -303,7 +289,6 @@ function replacePxStore(dest, incoming) {
       dob: px.dob || null, allergies: px.allergies || [],
       photo: px.photo || null, extra: {},
       updated_by: hctSession ? hctSession.user.id : null,
-      updated_by_name: hctProfile ? (hctProfile.full_name || 'User') : 'User',
       updated_at: new Date().toISOString()
     };
   }
@@ -342,7 +327,7 @@ function replacePxStore(dest, incoming) {
         discharge_date: null,
         deleted_at: null,
         deleted_by: null
-   });
+      });
       var res = await sb.from('ehr_patients').upsert(row, { onConflict: 'id' });
       if (res.error) console.warn('[HCT] admit patient error:', res.error.message);
     } catch(e) { console.warn('[HCT] admit patient failed:', e); }
@@ -974,6 +959,19 @@ function replacePxStore(dest, incoming) {
         });
       });
     });
+    var byKey = {};
+    rows.forEach(function(r) {
+      var k = r.user_id + '|' + r.px_id + '|' + r.section;
+      if (!byKey[k]) {
+        byKey[k] = r;
+      } else {
+        byKey[k].time_ms = Math.max(byKey[k].time_ms || 0, r.time_ms || 0);
+        byKey[k].visits = Math.max(byKey[k].visits || 0, r.visits || 0);
+        byKey[k].last_activity = r.last_activity;
+      }
+    });
+    rows = Object.keys(byKey).map(function(k){ return byKey[k]; });
+
     if (!rows.length) return;
     var sig = safeStr(rows.map(function(r){ return [r.px_id, r.section, r.time_ms, r.visits]; }));
     if (!force && sig === lastSyncedProgress) return;
