@@ -210,56 +210,77 @@
      ───────────────────────────────────────────────────────────────────── */
 
   async function loadPatients() {
-    if (DEMO || !sb) return;
-    try {
-      var res = await sb.from('ehr_patients')
-        .select('*')
+  if (DEMO || !sb) return;
+  try {
+    var res = await sb.from('ehr_patients')
+      .select('*')
+      .is('deleted_at', null)
+      .eq('is_discharged', false)
+      .order('admitted_at', { ascending: true });
+
+    if (res.error) {
+      console.warn('[HCT] load patients error:', res.error.message);
+      return;
+    }
+
+    var rows = res.data || [];
+
+    if (!rows.length) {
+      var anyRes = await sb.from('ehr_patients')
+        .select('id')
         .is('deleted_at', null)
-        .eq('is_discharged', false)
-        .order('admitted_at', { ascending: true });
-      if (res.error) { console.warn('[HCT] load patients error:', res.error.message); return; }
-      var rows = res.data || [];
-      if (!rows.length) {
+        .limit(1);
+
+      if (!anyRes.error && (!anyRes.data || anyRes.data.length === 0)) {
         await seedDefaultPatients();
-        return;
-      }
-      applyPatientRows(rows);
-    } catch(e) { console.warn('[HCT] load patients failed:', e); }
-  }
 
-  function applyPatientRows(rows) {
-    var newPATIENTS     = {};
-    var newOPD          = {};
-    var newLTC          = {};
-    rows.forEach(function(row) {
-      var px = dbRowToPx(row);
-      if (row.section_type === 'outpatient') {
-        if (!newOPD[row.ward]) newOPD[row.ward] = [];
-        newOPD[row.ward].push(px);
-      } else if (row.section_type === 'ltc') {
-        if (!newLTC[row.ward]) newLTC[row.ward] = [];
-        newLTC[row.ward].push(px);
-      } else {
-        if (!newPATIENTS[row.ward]) newPATIENTS[row.ward] = [];
-        newPATIENTS[row.ward].push(px);
-      }
-    });
-    mergePxStore(window.PATIENTS,     newPATIENTS);
-    mergePxStore(window.OPD_PATIENTS, newOPD);
-    mergePxStore(window.LTC_PATIENTS, newLTC);
-  }
+        res = await sb.from('ehr_patients')
+          .select('*')
+          .is('deleted_at', null)
+          .eq('is_discharged', false)
+          .order('admitted_at', { ascending: true });
 
-  function mergePxStore(dest, incoming) {
-    Object.keys(incoming).forEach(function(ward) {
-      if (!dest[ward]) dest[ward] = [];
-      var idMap = {};
-      dest[ward].forEach(function(p, i) { idMap[p.id] = i; });
-      incoming[ward].forEach(function(p) {
-        if (idMap[p.id] !== undefined) dest[ward][idMap[p.id]] = p;
-        else { dest[ward].push(p); idMap[p.id] = dest[ward].length - 1; }
-      });
-    });
+        rows = res.data || [];
+      }
+    }
+
+    applyPatientRows(rows);
+  } catch(e) {
+    console.warn('[HCT] load patients failed:', e);
   }
+}
+
+function applyPatientRows(rows) {
+  var newPATIENTS = {};
+  var newOPD = {};
+  var newLTC = {};
+
+  rows.forEach(function(row) {
+    var px = dbRowToPx(row);
+    if (row.section_type === 'outpatient') {
+      if (!newOPD[row.ward]) newOPD[row.ward] = [];
+      newOPD[row.ward].push(px);
+    } else if (row.section_type === 'ltc') {
+      if (!newLTC[row.ward]) newLTC[row.ward] = [];
+      newLTC[row.ward].push(px);
+    } else {
+      if (!newPATIENTS[row.ward]) newPATIENTS[row.ward] = [];
+      newPATIENTS[row.ward].push(px);
+    }
+  });
+
+  replacePxStore(window.PATIENTS, newPATIENTS);
+  replacePxStore(window.OPD_PATIENTS, newOPD);
+  replacePxStore(window.LTC_PATIENTS, newLTC);
+
+  try { if (typeof init === 'function') init(); } catch(e) {}
+}
+
+function replacePxStore(dest, incoming) {
+  if (!dest) return;
+  Object.keys(dest).forEach(function(k) { delete dest[k]; });
+  Object.keys(incoming).forEach(function(k) { dest[k] = incoming[k]; });
+}
 
   function dbRowToPx(row) {
     return {
@@ -315,8 +336,13 @@
     if (DEMO || !sb || !hctSession) return;
     try {
       var row = Object.assign(pxToDbRow(px, sectionType, wardId), {
-        created_by: hctSession.user.id, admitted_at: new Date().toISOString()
-      });
+        created_by: hctSession.user.id,
+        admitted_at: new Date().toISOString(),
+        is_discharged: false,
+        discharge_date: null,
+        deleted_at: null,
+        deleted_by: null
+   });
       var res = await sb.from('ehr_patients').upsert(row, { onConflict: 'id' });
       if (res.error) console.warn('[HCT] admit patient error:', res.error.message);
     } catch(e) { console.warn('[HCT] admit patient failed:', e); }
