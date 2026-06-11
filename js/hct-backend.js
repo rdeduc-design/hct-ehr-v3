@@ -1,13 +1,14 @@
 /* ════════════════════════════════════════════════════════════════════════
-   HCT EHR — Backend Integration Layer (v9)
+   HCT EHR — Backend Integration Layer (v10)
    Healthcare and Technology Institute Inc. · "How Care Transforms"
 
    Loads AFTER the main app script and provides:
      1. Real authentication (Supabase email/password login + signup)
      2. Cloud persistence of all chart data (autosaved per user)
-     3. Shared faculty data: student progress + chart submissions + grading
-     4. Improved Faculty Dashboard (tabs, roster, grading, analytics)
-     5. Mobile UX: off-canvas chart sidebar toggle
+     3. Real-time cross-user sync: patients, clinical data, alerts
+     4. Shared faculty data: student progress + chart submissions + grading
+     5. Improved Faculty Dashboard (tabs, roster, grading, analytics)
+     6. Mobile UX: off-canvas chart sidebar toggle
    If js/config.js is left empty the app runs in DEMO MODE (in-browser only).
    ════════════════════════════════════════════════════════════════════════ */
 (function () {
@@ -15,12 +16,13 @@
 
   var CFG = window.HCT_CONFIG || {};
   var DEMO = !(CFG.SUPABASE_URL && CFG.SUPABASE_ANON_KEY);
-  var sb = null;                 // supabase client
-  var hctSession = null;         // supabase auth session
-  var hctProfile = null;         // { id, full_name, role, student_no, email }
-  var lastSavedState = null;     // JSON string of last persisted chart state
-  var lastSyncedProgress = null; // JSON string of last persisted progress
-  var saveTimer = null, progTimer = null;
+  var sb = null;
+  var hctSession = null;
+  var hctProfile = null;
+  var lastSavedState = null;
+  var lastSyncedProgress = null;
+  var saveTimer = null, progTimer = null, pollTimer = null;
+  var realtimeChannel = null;
   var saving = false;
 
   if (!DEMO) {
@@ -34,8 +36,6 @@
 
   /* ──────────────────────────────────────────────────────────────────
      1. STATE PERSISTENCE
-     Every mutable chart store in the app is snapshotted into one JSON
-     document per user and upserted to `chart_states`.
      ────────────────────────────────────────────────────────────────── */
   var STATE_KEYS = [
     'WARD_ROOMS', 'PATIENTS', 'OPD_PATIENTS', 'LTC_PATIENTS',
@@ -68,7 +68,6 @@
         window[k] = state[k];
       }
     });
-    // Re-render directory views with restored data
     try { if (typeof init === 'function') init(); } catch (e) { console.warn('[HCT] re-render after restore:', e); }
   }
 
@@ -80,8 +79,9 @@
     if (DEMO || !hctSession || saving) return;
     var str = safeStringify(collectState());
     if (!str) return;
-    if (!force && str === lastSavedState) return; // nothing changed
+    if (!force && str === lastSavedState) return;
     saving = true;
+    setSyncBadge('saving');
     try {
       var res = await sb.from('chart_states').upsert({
         user_id: hctSession.user.id,
@@ -107,7 +107,6 @@
     } catch (e) { console.warn('[HCT] load state failed:', e); }
   }
 
-  // best-effort flush when the tab is hidden / closing
   function flushOnHide() {
     if (DEMO || !hctSession) return;
     var str = safeStringify(collectState());
@@ -120,7 +119,7 @@
     try {
       fetch(CFG.SUPABASE_URL + '/rest/v1/chart_states?on_conflict=user_id', {
         method: 'POST',
-        keepalive: body.length < 60000, // keepalive payload limit ~64KB
+        keepalive: body.length < 60000,
         headers: {
           'apikey': CFG.SUPABASE_ANON_KEY,
           'Authorization': 'Bearer ' + hctSession.access_token,
@@ -134,7 +133,156 @@
   }
 
   /* ──────────────────────────────────────────────────────────────────
-     2. STUDENT PROGRESS + SUBMISSIONS SYNC (shared with faculty)
+     2. REAL-TIME CROSS-USER SYNC
+     Merges patient lists and clinical data from all other users so
+     everyone sees the same patients and updates instantly.
+     ────────────────────────────────────────────────────────────────── */
+
+  // Patient-list and occupancy stores to merge by ward/clinic/wing key
+  var PATIENT_STORES = ['PATIENTS', 'OPD_PATIENTS', 'LTC_PATIENTS'];
+
+  // Per-patient clinical data stores — merged by patient ID
+  var CLINICAL_STORES = [
+    'EHR_STORE', 'NOTES_STORE', 'MAR_MEDS', 'MAR_HISTORY', 'MAR_STATUS', 'MAR_PRN',
+    'PROB_LIST_STORE', 'ALLERGIES', 'ADM_INFO_STORE', 'HPI_STORE', 'PMSH_STORE',
+    'CAREPLAN_STORE', 'SBAR_STORE', 'LAB_DATA', 'VS_DATA', 'IMAGING_STORE',
+    'BB_STORE', 'MICRO_STORE', 'PANELS_STORE', 'FLOWSHEET_STORE', 'FSH_STORE',
+    'IO_ENTRIES', 'ROS_ENTRIES', 'PE_ENTRIES', 'IMMUNIZATIONS', 'FORMS_STORE',
+    'OB_STORE', 'HOMEMEDS_STORE', 'SCR_ENTRIES'
+  ];
+
+  function mergeExternalState(remote) {
+    if (!remote) return;
+    var changed = false;
+
+    // ── Patient lists ──
+    PATIENT_STORES.forEach(function (key) {
+      var local = window[key] || {};
+      var ext = remote[key] || {};
+      Object.keys(ext).forEach(function (ward) {
+        var extArr = ext[ward] || [];
+        if (!extArr.length) return;
+        if (!local[ward]) { local[ward] = []; }
+        var localIdxMap = {};
+        local[ward].forEach(function (p, i) { localIdxMap[p.id] = i; });
+        var added = false;
+        extArr.forEach(function (ep) {
+          if (localIdxMap[ep.id] === undefined) {
+            local[ward].push(ep);
+            localIdxMap[ep.id] = local[ward].length - 1;
+            added = true;
+          } else {
+            // Overwrite stale local copy with remote (remote = source of truth for that user's patient)
+            local[ward][localIdxMap[ep.id]] = ep;
+            added = true;
+          }
+        });
+        if (added) { window[key] = local; changed = true; }
+      });
+    });
+
+    // ── MRN_MAP and VISIT_TYPE_MAP ──
+    if (remote.MRN_MAP) {
+      window.MRN_MAP = Object.assign({}, remote.MRN_MAP, window.MRN_MAP || {});
+      changed = true;
+    }
+    if (remote.VISIT_TYPE_MAP) {
+      window.VISIT_TYPE_MAP = Object.assign({}, remote.VISIT_TYPE_MAP, window.VISIT_TYPE_MAP || {});
+      changed = true;
+    }
+
+    // ── Room occupancy ──
+    if (remote.WARD_ROOMS) {
+      var localRooms = window.WARD_ROOMS || {};
+      Object.keys(remote.WARD_ROOMS).forEach(function (ward) {
+        if (!localRooms[ward]) { localRooms[ward] = {}; }
+        var remWard = remote.WARD_ROOMS[ward] || {};
+        Object.keys(remWard).forEach(function (room) {
+          if (remWard[room] === 'occupied') {
+            localRooms[ward][room] = 'occupied';
+            changed = true;
+          }
+        });
+      });
+      if (changed) window.WARD_ROOMS = localRooms;
+    }
+
+    // ── Per-patient clinical stores (add new patient entries only) ──
+    CLINICAL_STORES.forEach(function (key) {
+      var local = window[key] || {};
+      var ext = remote[key] || {};
+      var dirty = false;
+      Object.keys(ext).forEach(function (pxId) {
+        if (!local[pxId]) {
+          local[pxId] = ext[pxId];
+          dirty = true;
+        }
+        // Note: we intentionally do NOT overwrite existing local clinical data
+        // to avoid clobbering a user's in-progress charting.
+      });
+      if (dirty) { window[key] = local; changed = true; }
+    });
+
+    // ── Global alerts ──
+    if (Array.isArray(remote.GLOBAL_ALERTS) && remote.GLOBAL_ALERTS.length) {
+      var localAlerts = window.GLOBAL_ALERTS || [];
+      var localKeys = localAlerts.map(function (a) { return (a.msg || '') + '|' + (a.pxId || ''); });
+      var newAlerts = remote.GLOBAL_ALERTS.filter(function (a) {
+        return localKeys.indexOf((a.msg || '') + '|' + (a.pxId || '')) < 0;
+      });
+      if (newAlerts.length) {
+        window.GLOBAL_ALERTS = localAlerts.concat(newAlerts);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      try { if (typeof init === 'function') init(); } catch (e) {}
+      setSyncBadge('saved');
+    }
+  }
+
+  async function fetchAndMergeOtherStates() {
+    if (DEMO || !hctSession || !sb) return;
+    try {
+      var res = await sb.from('chart_states')
+        .select('user_id, state, updated_at')
+        .neq('user_id', hctSession.user.id);
+      if (res.error) { console.warn('[HCT] fetch other states error:', res.error.message); return; }
+      if (res.data && res.data.length) {
+        res.data.forEach(function (row) {
+          if (row.state) mergeExternalState(row.state);
+        });
+      }
+    } catch (e) { console.warn('[HCT] poll merge failed:', e); }
+  }
+
+  function subscribeToRealtime() {
+    if (DEMO || !sb || !hctSession) return;
+    try {
+      if (realtimeChannel) { sb.removeChannel(realtimeChannel); realtimeChannel = null; }
+      realtimeChannel = sb.channel('hct-ehr-sync')
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'chart_states'
+        }, function (payload) {
+          if (payload.new && payload.new.user_id !== hctSession.user.id && payload.new.state) {
+            mergeExternalState(payload.new.state);
+          }
+        })
+        .subscribe(function (status) {
+          if (status === 'SUBSCRIBED') {
+            console.log('[HCT] Realtime sync active');
+          }
+        });
+    } catch (e) {
+      console.warn('[HCT] Realtime subscribe failed (will use polling fallback):', e);
+    }
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     3. STUDENT PROGRESS + SUBMISSIONS SYNC
      ────────────────────────────────────────────────────────────────── */
   function findPxName(pxId) {
     var pools = [window.PATIENTS, window.OPD_PATIENTS, window.LTC_PATIENTS];
@@ -200,7 +348,6 @@
     } catch (e) { console.warn('[HCT] submission push failed:', e); }
   }
 
-  // Wrap the app's submitChart so submissions also reach the database
   var _origSubmitChart = window.submitChart;
   window.submitChart = function (pxId) {
     if (typeof _origSubmitChart === 'function') _origSubmitChart(pxId);
@@ -218,7 +365,7 @@
   };
 
   /* ──────────────────────────────────────────────────────────────────
-     3. AUTHENTICATION
+     4. AUTHENTICATION
      ────────────────────────────────────────────────────────────────── */
   function $(id) { return document.getElementById(id); }
   function showErr(id, msg) { var el = $(id); if (el) { el.textContent = msg; el.style.display = msg ? 'block' : 'none'; } }
@@ -236,7 +383,6 @@
     window.curUserName = name;
     window.curUserRole = isFaculty ? 'faculty' : 'student';
     if (hctProfile && hctProfile.student_no) window.curStudentId = hctProfile.student_no;
-
     var roleLabel = roleKey === 'admin' ? 'Administrator' : (isFaculty ? 'Faculty / Instructor' : 'Student Nurse');
     var nameEl = document.querySelector('.tb-user div div:first-child');
     if (nameEl) nameEl.textContent = name;
@@ -251,7 +397,6 @@
   async function fetchOrCreateProfile(user) {
     var res = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
     if (res.data) return res.data;
-    // Profile missing (e.g. trigger not installed) — create from metadata
     var meta = user.user_metadata || {};
     var prof = {
       id: user.id,
@@ -268,6 +413,8 @@
   async function enterApp() {
     applyUserToUI();
     await loadChartState();
+    // Load other users' patients immediately on entry
+    await fetchAndMergeOtherStates();
     if (typeof showScreen === 'function') showScreen('s-app');
     startBackgroundSync();
     setSyncBadge('saved');
@@ -276,19 +423,29 @@
   function startBackgroundSync() {
     if (saveTimer) clearInterval(saveTimer);
     if (progTimer) clearInterval(progTimer);
+    if (pollTimer) clearInterval(pollTimer);
     if (DEMO) return;
-    saveTimer = setInterval(function () { saveChartState(false); }, 15000);
+    // Save every 10 seconds
+    saveTimer = setInterval(function () { saveChartState(false); }, 10000);
+    // Sync student progress every 30 seconds
     progTimer = setInterval(function () { syncProgress(false); }, 30000);
+    // Poll other users' states every 10 seconds as a fallback
+    pollTimer = setInterval(function () { fetchAndMergeOtherStates(); }, 10000);
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'hidden') flushOnHide();
+      if (document.visibilityState === 'visible') {
+        saveChartState(true);
+        fetchAndMergeOtherStates();
+      }
     });
     window.addEventListener('beforeunload', flushOnHide);
+    // Supabase Realtime for instant push updates (postgres_changes)
+    subscribeToRealtime();
   }
 
-  var _origDoLogin = window.doLogin;
   window.doLogin = async function () {
     showErr('auth-error-login', '');
-    if (DEMO) { if (typeof _origDoLogin === 'function') _origDoLogin(); return; }
+    if (DEMO) { if (typeof window._origDoLogin === 'function') window._origDoLogin(); return; }
     var email = ($('login-email') || {}).value || '';
     var pass = ($('login-password') || {}).value || '';
     email = email.trim();
@@ -309,7 +466,7 @@
 
   window.doSignup = async function () {
     showErr('auth-error-signup', '');
-    if (DEMO) { if (typeof _origDoLogin === 'function') _origDoLogin(); return; }
+    if (DEMO) { if (typeof window._origDoLogin === 'function') window._origDoLogin(); return; }
     var f = (($('reg-fname') || {}).value || '').trim();
     var l = (($('reg-lname') || {}).value || '').trim();
     var email = (($('reg-email') || {}).value || '').trim();
@@ -333,7 +490,6 @@
         hctProfile = await fetchOrCreateProfile(res.data.user);
         await enterApp();
       } else {
-        // Email confirmation is enabled in Supabase
         if (typeof showScreen === 'function') showScreen('s-login');
         showInfo('auth-info-login', 'Account created! Check your email to confirm, then sign in.');
       }
@@ -349,6 +505,7 @@
       if (!DEMO && hctSession) {
         await saveChartState(true);
         await syncProgress(true);
+        if (realtimeChannel) sb.removeChannel(realtimeChannel);
         await sb.auth.signOut();
       }
     } catch (e) { /* ignore */ }
@@ -373,7 +530,7 @@
   }
 
   /* ──────────────────────────────────────────────────────────────────
-     4. SYNC STATUS BADGE (small, unobtrusive, in topbar)
+     5. SYNC STATUS BADGE
      ────────────────────────────────────────────────────────────────── */
   function setSyncBadge(state) {
     if (DEMO) return;
@@ -387,15 +544,12 @@
       bar.insertBefore(el, bar.firstChild);
     }
     el.innerHTML = state === 'saved'
-      ? '<span style="width:7px;height:7px;border-radius:50%;background:#2BBFAD;display:inline-block"></span>Cloud sync on'
+      ? '<span style="width:7px;height:7px;border-radius:50%;background:#2BBFAD;display:inline-block"></span>Live sync on'
       : '<span style="width:7px;height:7px;border-radius:50%;background:#F59E0B;display:inline-block"></span>Saving…';
   }
 
   /* ──────────────────────────────────────────────────────────────────
-     5. IMPROVED FACULTY DASHBOARD
-     Tabs: Overview · Students · Submissions & Grading · Section Analytics
-     Live data from Supabase (all students); in demo mode shows the
-     current browser's in-memory data.
+     6. FACULTY DASHBOARD (unchanged from v9)
      ────────────────────────────────────────────────────────────────── */
   var SECTION_LABELS = {
     'visit-summary': 'Visit Summary', 'vitals': 'Vital Signs', 'mar': 'MAR',
@@ -414,11 +568,10 @@
     catch (e) { return iso; }
   }
 
-  var _dashData = null; // {students, progress, submissions}
+  var _dashData = null;
 
   async function fetchDashData() {
     if (DEMO || !sb) {
-      // Build from in-memory stores (current browser only)
       var progress = [];
       var FP = window.FACULTY_PROGRESS || {};
       Object.keys(FP).forEach(function (pxId) {
@@ -505,7 +658,6 @@
     var today = new Date(); today.setHours(0, 0, 0, 0);
     var activeToday = {};
     d.progress.forEach(function (r) { if (r.last_activity && new Date(r.last_activity) >= today) activeToday[r.student_no] = 1; });
-
     var html = '<div class="fdash-stat-grid">' +
       statCard(d.students.length || Object.keys(groupBy(d.progress, 'student_no')).length, 'Registered Students') +
       statCard(Object.keys(activeToday).length, 'Active Today', '#16A34A') +
@@ -514,8 +666,6 @@
       statCard(avgGrade != null ? avgGrade + '%' : '—', 'Avg. Grade', '#7C3AED') +
       statCard(fmtMin(totalTime), 'Total Charting Time', '#0D9488') +
       '</div>';
-
-    // Recent activity feed
     var recent = d.progress.slice(0, 8);
     html += '<div class="fdash-card"><div class="fdash-card-hdr">Recent Charting Activity</div>';
     if (!recent.length) html += '<div class="fdash-empty">No student activity recorded yet.</div>';
@@ -527,8 +677,6 @@
       html += '</tbody></table></div>';
     }
     html += '</div>';
-
-    // Latest submissions preview
     var latest = d.submissions.slice(0, 3);
     if (latest.length) {
       html += '<div class="fdash-card"><div class="fdash-card-hdr">Latest Submissions</div>';
@@ -552,8 +700,7 @@
     var byStudent = groupBy(d.progress, 'student_no');
     var subsByStudent = groupBy(d.submissions, 'student_no');
     var roster = d.students.length ? d.students : Object.keys(byStudent).map(function (k) { return { student_no: k, full_name: (byStudent[k][0] || {}).student_name || 'Student' }; });
-    if (!roster.length) return '<div class="fdash-empty">No students registered yet. Students appear here after they sign up and begin charting.</div>';
-
+    if (!roster.length) return '<div class="fdash-empty">No students registered yet.</div>';
     var html = '<div class="fdash-card"><div class="fdash-card-hdr">Student Roster (' + roster.length + ')</div><div class="fdash-table-scroll"><table class="fdash-table"><thead><tr><th>Student</th><th>ID No.</th><th>Patients Charted</th><th>Sections</th><th>Total Time</th><th>Submissions</th><th>Avg Grade</th><th>Last Active</th></tr></thead><tbody>';
     roster.forEach(function (st) {
       var rows = byStudent[st.student_no] || [];
@@ -564,7 +711,6 @@
       var totalMs = rows.reduce(function (a, r) { return a + (r.time_ms || 0); }, 0);
       var last = rows.map(function (r) { return r.last_activity; }).filter(Boolean).sort().pop();
       html += '<tr><td><strong>' + esc(st.full_name) + '</strong></td><td class="fdash-muted">' + esc(st.student_no || '—') + '</td><td>' + Object.keys(pxSet).length + '</td><td>' + rows.length + '</td><td>' + fmtMin(totalMs) + '</td><td>' + subs.length + '</td><td>' + avg + '</td><td>' + fmtDateShort(last) + '</td></tr>';
-      // expandable per-section detail row
       if (rows.length) {
         var detail = rows.map(function (r) { return esc(secLabel(r.section)) + ' (' + fmtMin(r.time_ms) + ', ' + r.visits + '×)'; }).join(' · ');
         html += '<tr class="fdash-detail-row"><td colspan="8">' + esc(st.full_name).split(' ')[0] + '\u2019s sections: ' + detail + '</td></tr>';
@@ -576,7 +722,7 @@
 
   function renderSubmissions() {
     var d = _dashData;
-    if (!d.submissions.length) return '<div class="fdash-empty">No charts submitted yet. Submissions appear here when students complete the PEARLS reflection and submit their chart.</div>';
+    if (!d.submissions.length) return '<div class="fdash-empty">No charts submitted yet.</div>';
     var PQ = window.PEARLS_QUESTIONS || [];
     var html = '';
     d.submissions.forEach(function (s) {
@@ -633,7 +779,7 @@
 
   function renderAnalytics() {
     var d = _dashData;
-    if (!d.progress.length) return '<div class="fdash-empty">No charting activity yet — analytics will appear once students start working in patient charts.</div>';
+    if (!d.progress.length) return '<div class="fdash-empty">No charting activity yet.</div>';
     var totals = {};
     d.progress.forEach(function (r) {
       var t = totals[r.section] = totals[r.section] || { time: 0, visits: 0, students: {} };
@@ -650,19 +796,17 @@
         '<div class="fdash-bar-val">' + fmtMin(t.time) + ' · ' + t.visits + ' visits · ' + Object.keys(t.students).length + ' student(s)</div></div>';
     });
     html += '</div></div>';
-
-    // Least-engaged sections — teaching gap callout (retained & enhanced)
     var low = secs.slice().reverse().slice(0, 3);
     html += '<div class="fdash-card"><div class="fdash-card-hdr" style="background:#7A1F23">⚠ Areas Needing Improvement (least time spent)</div><div style="padding:14px">';
     low.forEach(function (sec) {
       html += '<div class="fdash-sub-line"><span style="font-weight:600;color:#B91C1C">' + esc(secLabel(sec)) + '</span><span class="fdash-muted">' + fmtMin(totals[sec].time) + ' total · ' + totals[sec].visits + ' visits</span></div>';
     });
-    html += '<div class="fdash-muted" style="margin-top:10px">These sections received the least attention across the cohort. Consider targeted skills-lab activities, focused simulation objectives, or pre-briefing emphasis to close these documentation gaps before the next rotation.</div></div></div>';
+    html += '<div class="fdash-muted" style="margin-top:10px">These sections received the least attention across the cohort. Consider targeted skills-lab activities or pre-briefing emphasis to close these gaps.</div></div></div>';
     return html;
   }
 
   /* ──────────────────────────────────────────────────────────────────
-     6. MOBILE: off-canvas chart sidebar toggle
+     7. MOBILE: off-canvas chart sidebar toggle
      ────────────────────────────────────────────────────────────────── */
   function setupMobileNav() {
     var btn = document.createElement('button');
@@ -679,7 +823,6 @@
     backdrop.id = 'hct-mobile-nav-backdrop';
     backdrop.onclick = closeMobileNav;
     document.body.appendChild(backdrop);
-    // auto-close after choosing a section
     document.addEventListener('click', function (ev) {
       if (window.innerWidth > 768) return;
       var t = ev.target;
@@ -696,7 +839,7 @@
   }
 
   /* ──────────────────────────────────────────────────────────────────
-     7. DASHBOARD STYLES (injected)
+     8. DASHBOARD STYLES (injected)
      ────────────────────────────────────────────────────────────────── */
   function injectStyles() {
     var css = '' +
@@ -759,7 +902,7 @@
     injectStyles();
     setupMobileNav();
     restoreSession();
-    console.log('[HCT] Backend layer ready — mode: ' + (DEMO ? 'DEMO (no Supabase configured)' : 'CLOUD (Supabase)'));
+    console.log('[HCT] Backend layer ready — mode: ' + (DEMO ? 'DEMO (no Supabase configured)' : 'CLOUD (Supabase) + Real-time sync'));
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
