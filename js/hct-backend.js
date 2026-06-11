@@ -1392,7 +1392,7 @@
       html+='<tr><td><strong>'+esc(st.full_name)+'</strong></td><td class="fdash-muted">'+esc(st.student_no||'—')+'</td><td>'+Object.keys(pxSet).length+'</td><td>'+rows.length+'</td><td>'+fmtMin(totalMs)+'</td><td>'+subs.length+'</td><td>'+avg+'</td><td>'+fmtDateShort(last)+'</td></tr>';
       if(rows.length){
         var detail=rows.map(function(r){return esc(secLabel(r.section))+' ('+fmtMin(r.time_ms)+', '+r.visits+'×)';}).join(' · ');
-        html+='<tr class="fdash-detail-row"><td colspan="8">'+esc(st.full_name).split(' ')[0]+''s sections: '+detail+'</td></tr>';
+        html+='<tr class="fdash-detail-row"><td colspan="8">'+esc(st.full_name).split(' ')[0]+'\'s sections: '+detail+'</td></tr>';
       }
     });
     html+='</tbody></table></div></div>';
