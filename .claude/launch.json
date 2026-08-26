@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "HCT EHR",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "hct-ehr-v3-main", "-p", "3456", "--no-clipboard"],
+      "port": 3456
+    }
+  ]
+}

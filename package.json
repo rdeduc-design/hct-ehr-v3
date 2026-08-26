@@ -1,0 +1,9 @@
+{
+  "name": "hct-ehr-v3-main",
+  "version": "1.0.0",
+  "description": "HCT EHR v3 - Static web application",
+  "scripts": {
+    "start": "npx serve ."
+  },
+  "private": true
+}

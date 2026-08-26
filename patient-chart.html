@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>HCT EHR — Patient Chart</title>
+<link rel="icon" href="assets/hctlogoteal.png" type="image/png">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --navy:#1B2A4A;--navy-dark:#111D33;
+  --teal:#2BBFAD;--teal-light:#E6F7F5;--teal-dark:#1A9E8D;
+  --cream:#F8F7F3;--surface:#FFFFFF;
+  --text:#1B2A4A;--text-muted:#6B7C99;--text-light:#A8B5CC;
+  --border:#E4E8F0;
+  --critical:#D64045;--critical-bg:#FDECEC;
+  --discharge:#E08B2A;--discharge-bg:#FEF3E2;
+  --admitted:#27AE87;--admitted-bg:#E6F7F2;
+}
+body{font-family:'DM Sans',sans-serif;background:var(--cream);color:var(--text);min-height:100vh}
+
+/* ── TOP BAR ── */
+.top-bar{background:var(--navy);padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:sticky;top:0;z-index:100;box-shadow:0 2px 12px rgba(27,42,74,.25)}
+.tb-logo{display:flex;align-items:center;gap:10px;text-decoration:none;cursor:pointer}
+.tb-title{font-family:'DM Serif Display',serif;font-size:16px;color:#fff;line-height:1.2}
+.tb-sub{font-size:10px;color:rgba(255,255,255,.45);letter-spacing:1px;text-transform:uppercase}
+.tb-chip{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600}
+
+/* ── LOGIN SCREEN ── */
+#login-screen{min-height:calc(100vh - 56px);display:flex;align-items:center;justify-content:center}
+.login-card{background:#fff;border-radius:16px;padding:36px;width:400px;box-shadow:0 8px 40px rgba(27,42,74,.12);border:1px solid var(--border)}
+.login-hdr{text-align:center;margin-bottom:24px}
+.login-title{font-family:'DM Serif Display',serif;font-size:22px;color:var(--navy);margin-bottom:4px}
+.login-sub{font-size:13px;color:var(--text-muted);line-height:1.5}
+.fg{margin-bottom:14px}
+.fg label{display:block;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+.fg input{width:100%;padding:10px 14px;border:1.5px solid var(--border);border-radius:9px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;transition:border-color .2s}
+.fg input:focus{border-color:var(--teal)}
+.btn-login{width:100%;padding:12px;background:var(--navy);color:#fff;border:none;border-radius:9px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer;transition:background .2s;margin-top:4px}
+.btn-login:hover{background:var(--navy-dark)}
+.btn-login:disabled{opacity:.55;cursor:not-allowed}
+.msg-box{font-size:12px;margin-top:12px;text-align:center;padding:9px 12px;border-radius:8px;display:none}
+.msg-box.error{background:var(--critical-bg);color:var(--critical);display:block;border:1px solid rgba(214,64,69,.2)}
+.msg-box.info{background:var(--teal-light);color:var(--teal-dark);display:block;border:1px solid rgba(43,191,173,.2)}
+
+/* ── CHART ── */
+#chart-screen{display:none}
+.chart-wrap{max-width:960px;margin:0 auto;padding:26px 20px}
+
+/* ── PATIENT BANNER ── */
+.px-banner{background:var(--navy);border-radius:14px;padding:20px 24px;margin-bottom:22px;display:flex;align-items:center;gap:20px;box-shadow:0 4px 20px rgba(27,42,74,.2);flex-wrap:wrap}
+.px-avatar{width:58px;height:58px;border-radius:50%;background:var(--teal);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff;flex-shrink:0;overflow:hidden}
+.px-avatar img{width:100%;height:100%;object-fit:cover}
+.px-info{flex:1;min-width:200px}
+.px-name{font-family:'DM Serif Display',serif;font-size:20px;color:#fff;margin-bottom:4px}
+.px-meta{font-size:12px;color:rgba(255,255,255,.6);display:flex;flex-wrap:wrap;gap:12px}
+.px-status{padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.3px;align-self:center;flex-shrink:0}
+.status-admitted{background:var(--admitted);color:#fff}
+.status-critical{background:var(--critical);color:#fff}
+.status-isolation{background:#8B5CF6;color:#fff}
+.status-discharge{background:var(--discharge);color:#fff}
+
+/* ── SECTION CARDS ── */
+.sec-card{background:#fff;border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:16px;box-shadow:0 1px 4px rgba(27,42,74,.05)}
+.sec-hdr{background:var(--navy);padding:11px 18px;display:flex;align-items:center;gap:8px}
+.sec-hdr-title{font-size:13px;font-weight:600;color:#fff;letter-spacing:.2px}
+.sec-body{padding:16px 18px}
+
+/* ── INFO GRID ── */
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px}
+.info-cell{background:var(--cream);border-radius:8px;padding:10px 12px}
+.info-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:3px}
+.info-val{font-size:13px;font-weight:600;color:var(--navy);line-height:1.4}
+
+/* ── VITALS ── */
+.vs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
+.vs-tile{background:var(--cream);border-radius:10px;padding:12px 14px;text-align:center}
+.vs-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted);margin-bottom:6px}
+.vs-val{font-size:22px;font-weight:700;color:var(--navy);line-height:1}
+.vs-unit{font-size:10px;color:var(--text-light);margin-top:3px}
+.vs-tile.crit{background:var(--critical-bg);border:1px solid rgba(214,64,69,.2)}
+.vs-tile.crit .vs-val{color:var(--critical)}
+.vs-tile.warn{background:var(--discharge-bg);border:1px solid rgba(224,139,42,.2)}
+.vs-tile.warn .vs-val{color:var(--discharge)}
+.vs-tile.ok{background:var(--admitted-bg);border:1px solid rgba(39,174,135,.2)}
+.vs-tile.ok .vs-val{color:var(--admitted)}
+
+/* ── TABLE ── */
+.rt{width:100%;border-collapse:collapse;font-size:12px}
+.rt th{text-align:left;padding:8px 12px;background:var(--cream);color:var(--text-muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)}
+.rt td{padding:9px 12px;border-bottom:1px solid var(--border);color:var(--navy);vertical-align:top}
+.rt tr:last-child td{border-bottom:none}
+
+/* ── ALLERGY ── */
+.al-badge{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:20px;font-size:12px;font-weight:600;margin:3px;background:var(--critical-bg);color:var(--critical);border:1px solid rgba(214,64,69,.2)}
+
+/* ── NOTES ── */
+.note-row{padding:12px 0;border-bottom:1px solid var(--border)}
+.note-row:last-child{border-bottom:none}
+.note-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:5px}
+.note-auth{font-size:12px;font-weight:600;color:var(--navy)}
+.note-ts{font-size:11px;color:var(--text-muted)}
+.note-typ{padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700;background:var(--teal-light);color:var(--teal-dark)}
+.note-txt{font-size:12px;color:var(--text);line-height:1.65;white-space:pre-wrap}
+
+/* ── CARE PLAN ── */
+.cp-card{background:var(--cream);border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid var(--border)}
+.cp-card:last-child{margin-bottom:0}
+.cp-nanda{font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px}
+.cp-row{margin-bottom:6px}
+.cp-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted);margin-bottom:2px}
+.cp-val{font-size:12px;color:var(--text);line-height:1.6}
+
+/* ── MED ── */
+.med-row{padding:10px 0;border-bottom:1px solid var(--border);display:flex;gap:12px}
+.med-row:last-child{border-bottom:none}
+.med-dot{width:8px;height:8px;border-radius:50%;background:var(--navy);flex-shrink:0;margin-top:5px}
+.med-name{font-size:13px;font-weight:600;color:var(--navy)}
+.med-det{font-size:11px;color:var(--text-muted);margin-top:2px}
+
+/* ── PROBLEM TYPE BADGES ── */
+.pt{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;margin-right:4px}
+.pt-Primary{background:#EFF6FF;color:#2563EB}
+.pt-Secondary{background:#F5F3FF;color:#7C3AED}
+.pt-Chronic{background:#FDF4FF;color:#A21CAF}
+.pt-Nursing{background:var(--teal-light);color:var(--teal-dark)}
+.pt-Risk,.pt-Risk-Diagnosis{background:var(--discharge-bg);color:var(--discharge)}
+.pt-Co-morbidity{background:var(--cream);color:var(--text-muted)}
+
+/* ── SBAR ── */
+.sbar-block{background:var(--cream);border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid var(--border)}
+.sbar-block:last-child{margin-bottom:0}
+.sbar-row{margin-bottom:8px}
+.sbar-row:last-child{margin-bottom:0}
+.sbar-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--teal-dark);margin-bottom:3px}
+.sbar-txt{font-size:12px;color:var(--text);line-height:1.65;white-space:pre-wrap}
+.sbar-meta{font-size:11px;color:var(--text-muted);margin-top:8px;padding-top:6px;border-top:1px solid var(--border)}
+
+/* ── HISTORY ── */
+.hx-section{margin-bottom:12px}
+.hx-section:last-child{margin-bottom:0}
+.hx-lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:5px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.hx-item{font-size:12px;color:var(--text);padding:4px 0;line-height:1.5;display:flex;gap:8px}
+.hx-item::before{content:'•';color:var(--teal);flex-shrink:0}
+.hx-txt{font-size:12px;color:var(--text);line-height:1.65;white-space:pre-wrap}
+
+/* ── ORDERS ── */
+.ord-row{padding:9px 0;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:flex-start}
+.ord-row:last-child{border-bottom:none}
+.ord-badge{padding:3px 9px;border-radius:8px;font-size:10px;font-weight:700;flex-shrink:0;text-transform:uppercase;letter-spacing:.3px}
+.ord-medication{background:#EFF6FF;color:#2563EB}
+.ord-lab{background:var(--teal-light);color:var(--teal-dark)}
+.ord-imaging{background:#F5F3FF;color:#7C3AED}
+.ord-diet{background:#FEF3E2;color:#B45309}
+.ord-activity{background:#E6F7F2;color:#059669}
+.ord-general{background:var(--cream);color:var(--text-muted)}
+.ord-body{flex:1;min-width:0}
+.ord-name{font-size:13px;font-weight:600;color:var(--navy)}
+.ord-det{font-size:11px;color:var(--text-muted);margin-top:2px}
+
+/* ── LABS ── */
+.lab-group{margin-bottom:14px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.lab-group:last-child{margin-bottom:0}
+.lab-group-hdr{background:var(--cream);padding:8px 12px;font-size:11px;font-weight:700;color:var(--navy);letter-spacing:.2px;display:flex;justify-content:space-between;align-items:center}
+.lab-result-row{padding:8px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.lab-result-name{font-size:12px;font-weight:600;color:var(--navy);flex:1}
+.lab-result-val{font-size:13px;font-weight:700}
+.lab-result-val.crit{color:var(--critical)}
+.lab-result-val.warn{color:var(--discharge)}
+.lab-result-val.ok{color:var(--admitted)}
+.lab-result-ref{font-size:10px;color:var(--text-muted)}
+.lab-result-time{font-size:10px;color:var(--text-light);margin-left:auto}
+.lab-flag{font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;flex-shrink:0}
+.lab-flag.H{background:var(--critical-bg);color:var(--critical)}
+.lab-flag.L{background:#EFF6FF;color:#2563EB}
+.lab-flag.C{background:var(--critical-bg);color:var(--critical)}
+
+/* ── I/O ── */
+.io-summary{display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.io-sum-box{flex:1;min-width:120px;background:var(--cream);border-radius:10px;padding:12px 14px;text-align:center;border:1px solid var(--border)}
+.io-sum-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted);margin-bottom:4px}
+.io-sum-val{font-size:20px;font-weight:700;color:var(--navy)}
+.io-sum-unit{font-size:10px;color:var(--text-light)}
+.io-sum-box.balance-pos .io-sum-val{color:var(--admitted)}
+.io-sum-box.balance-neg .io-sum-val{color:var(--critical)}
+
+/* ── SCREENINGS ── */
+.scr-card{background:var(--cream);border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid var(--border)}
+.scr-card:last-child{margin-bottom:0}
+.scr-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;flex-wrap:wrap;gap:8px}
+.scr-tool{font-size:13px;font-weight:700;color:var(--navy)}
+.scr-score-box{text-align:right}
+.scr-score{font-size:18px;font-weight:700}
+.scr-result{font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;margin-top:2px;display:inline-block}
+.scr-result.high-risk{background:var(--critical-bg);color:var(--critical)}
+.scr-result.moderate{background:var(--discharge-bg);color:var(--discharge)}
+.scr-result.low-risk{background:var(--admitted-bg);color:var(--admitted)}
+.scr-result.normal{background:var(--admitted-bg);color:var(--admitted)}
+.scr-items{margin-top:8px;border-top:1px solid var(--border);padding-top:8px}
+.scr-item{display:flex;justify-content:space-between;padding:4px 0;font-size:11px;color:var(--text);border-bottom:1px solid rgba(228,232,240,.5)}
+.scr-item:last-child{border-bottom:none}
+.scr-meta{font-size:11px;color:var(--text-muted);margin-top:6px}
+
+/* ── FORMS ── */
+.form-block{background:var(--cream);border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid var(--border)}
+.form-block:last-child{margin-bottom:0}
+.form-title{font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.form-field{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.form-field:last-child{margin-bottom:0}
+.form-field-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted)}
+.form-field-val{font-size:12px;color:var(--text);line-height:1.5}
+
+/* ── FOOTER ── */
+.chart-footer{text-align:center;padding:24px 0;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border);margin-top:8px}
+
+/* ── PRINT LETTERHEAD ── */
+.print-letterhead{display:none}
+@media print{
+  .top-bar{position:relative;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .no-print{display:none!important}
+  .sec-card{box-shadow:none;break-inside:avoid}
+  body{background:#fff}
+  .print-letterhead{display:block;margin-bottom:20px;padding-bottom:14px;border-bottom:3px solid var(--navy)}
+  .pl-header{display:flex;align-items:center;gap:16px;margin-bottom:10px}
+  .pl-logo{width:60px;height:60px;border-radius:50%;object-fit:cover;flex-shrink:0}
+  .pl-logo-fb{width:60px;height:60px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-family:'DM Serif Display',serif;font-size:22px;font-weight:700;color:#fff;flex-shrink:0}
+  .pl-inst{flex:1}
+  .pl-inst-name{font-family:'DM Serif Display',serif;font-size:22px;color:var(--navy);line-height:1.2}
+  .pl-inst-tag{font-size:11px;color:var(--text-muted);letter-spacing:.5px;text-transform:uppercase;margin-top:2px}
+  .pl-doctype{font-size:12px;font-weight:700;color:var(--teal-dark);text-transform:uppercase;letter-spacing:.5px;text-align:right;align-self:flex-end}
+  .pl-px{display:flex;gap:24px;flex-wrap:wrap;background:var(--cream);border-radius:8px;padding:10px 14px;font-size:12px;color:var(--text)}
+  .pl-px-name{font-family:'DM Serif Display',serif;font-size:16px;color:var(--navy);font-weight:700;width:100%;margin-bottom:4px}
+  .pl-px span{white-space:nowrap}
+  .pl-px strong{color:var(--navy)}
+  .pl-conf{font-size:9px;color:var(--text-light);text-align:center;margin-top:8px;letter-spacing:.3px}
+}
+@media(max-width:600px){
+  .px-banner{gap:14px}
+  .info-grid,.vs-grid{grid-template-columns:1fr 1fr}
+  .chart-wrap{padding:16px 12px}
+}
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="top-bar">
+  <div class="tb-logo" onclick="window.location.href='index.html'">
+    <div style="width:36px;height:36px;border-radius:50%;overflow:hidden;flex-shrink:0;background:var(--teal);display:flex;align-items:center;justify-content:center;font-family:'DM Serif Display',serif;font-size:14px;font-weight:700;color:#fff"><img src="assets/hctlogoteal.png" alt="HCT" style="width:100%;height:100%;object-fit:cover" onerror="this.remove()">HCT</div>
+    <div>
+      <div class="tb-title">HCT Institute EHR</div>
+      <div class="tb-sub">How Care Transforms</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="tb-chip" style="background:rgba(43,191,173,.2);color:var(--teal);border:1px solid rgba(43,191,173,.3)">&#128274; Read-Only</div>
+    <button class="tb-chip no-print" onclick="window.print()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);color:#fff;cursor:pointer;font-family:'DM Sans',sans-serif">&#128438; Print</button>
+    <a id="edit-chart-btn" href="index.html" class="tb-chip no-print" style="background:rgba(43,191,173,.25);border:1px solid rgba(43,191,173,.4);color:#fff;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:4px">&#9998; Edit Chart</a>
+  </div>
+</div>
+
+<!-- LOGIN -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-hdr">
+      <div style="width:52px;height:52px;border-radius:12px;background:var(--navy);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;font-family:'DM Serif Display',serif;font-size:18px;color:#fff">HCT</div>
+      <div class="login-title">Patient Chart Access</div>
+      <div class="login-sub" style="margin-top:5px">Sign in with your HCT EHR credentials to view this patient's read-only chart</div>
+    </div>
+    <div class="fg"><label>Email Address</label><input type="email" id="in-email" placeholder="user@hct.ph" autocomplete="email"/></div>
+    <div class="fg"><label>Password</label><input type="password" id="in-pw" placeholder="••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"/></div>
+    <button class="btn-login" id="btn-login" onclick="doLogin()">Sign In to View Chart</button>
+    <div class="msg-box" id="msg-box"></div>
+    <p style="font-size:11px;color:var(--text-muted);text-align:center;margin-top:16px;line-height:1.6">This chart is read-only. To make changes, open the full EHR system. <a href="index.html" style="color:var(--teal);text-decoration:none">Go to EHR</a></p>
+  </div>
+</div>
+
+<!-- CHART VIEW -->
+<div id="chart-screen">
+  <div class="chart-wrap">
+
+    <!-- Print Letterhead (hidden on screen, visible on print) -->
+    <div class="print-letterhead" id="print-letterhead">
+      <div class="pl-header">
+        <img src="assets/hctlogoteal.png" alt="HCT" class="pl-logo" onerror="this.style.display='none';document.getElementById('pl-logo-fb').style.display='flex'">
+        <div id="pl-logo-fb" class="pl-logo-fb" style="display:none">HCT</div>
+        <div class="pl-inst">
+          <div class="pl-inst-name">HCT Institute</div>
+          <div class="pl-inst-tag">How Care Transforms &nbsp;·&nbsp; Electronic Health Record System</div>
+        </div>
+        <div class="pl-doctype">Read-Only<br>Patient Chart</div>
+      </div>
+      <div class="pl-px" id="pl-px-summary"></div>
+      <div class="pl-conf">CONFIDENTIAL — Contains Protected Health Information (PHI) — Handle per RA 10173 (Data Privacy Act of 2012)</div>
+    </div>
+
+    <!-- Patient Banner -->
+    <div class="px-banner">
+      <div class="px-avatar" id="px-av">—</div>
+      <div class="px-info">
+        <div class="px-name" id="px-name">Loading…</div>
+        <div class="px-meta" id="px-meta"></div>
+      </div>
+      <div class="px-status status-admitted" id="px-stat"></div>
+    </div>
+
+    <!-- Demographics -->
+    <div class="sec-card">
+      <div class="sec-hdr"><span style="font-size:16px">&#128101;</span><span class="sec-hdr-title">Patient Demographics</span></div>
+      <div class="sec-body"><div class="info-grid" id="sec-demo"></div></div>
+    </div>
+
+    <!-- Allergies -->
+    <div class="sec-card" id="sec-allergy" style="display:none">
+      <div class="sec-hdr" style="background:#b03030"><span style="font-size:16px">&#9888;</span><span class="sec-hdr-title">Allergies &amp; Adverse Reactions</span></div>
+      <div class="sec-body" id="sec-allergy-body"></div>
+    </div>
+
+    <!-- Vitals -->
+    <div class="sec-card" id="sec-vitals" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128138;</span><span class="sec-hdr-title">Most Recent Vital Signs</span></div>
+      <div class="sec-body" id="sec-vitals-body"></div>
+    </div>
+
+    <!-- Physical Examination -->
+    <div class="sec-card" id="sec-pe" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128203;</span><span class="sec-hdr-title">Physical Examination</span></div>
+      <div class="sec-body" id="sec-pe-body"></div>
+    </div>
+
+    <!-- Problems -->
+    <div class="sec-card" id="sec-probs" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128203;</span><span class="sec-hdr-title">Problem List</span></div>
+      <div class="sec-body" id="sec-probs-body"></div>
+    </div>
+
+    <!-- Patient History -->
+    <div class="sec-card" id="sec-hx" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128214;</span><span class="sec-hdr-title">Patient History</span></div>
+      <div class="sec-body" id="sec-hx-body"></div>
+    </div>
+
+    <!-- SBAR -->
+    <div class="sec-card" id="sec-sbar" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128203;</span><span class="sec-hdr-title">SBAR Communication</span></div>
+      <div class="sec-body" id="sec-sbar-body"></div>
+    </div>
+
+    <!-- Orders -->
+    <div class="sec-card" id="sec-orders" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128196;</span><span class="sec-hdr-title">Active Orders</span></div>
+      <div class="sec-body" id="sec-orders-body"></div>
+    </div>
+
+    <!-- Labs -->
+    <div class="sec-card" id="sec-labs" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128300;</span><span class="sec-hdr-title">Laboratory Results</span></div>
+      <div class="sec-body" id="sec-labs-body"></div>
+    </div>
+
+    <!-- I&O -->
+    <div class="sec-card" id="sec-io" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128167;</span><span class="sec-hdr-title">Intake &amp; Output</span></div>
+      <div class="sec-body" id="sec-io-body"></div>
+    </div>
+
+    <!-- Screenings -->
+    <div class="sec-card" id="sec-scr" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#10003;</span><span class="sec-hdr-title">Screenings &amp; Scales</span></div>
+      <div class="sec-body" id="sec-scr-body"></div>
+    </div>
+
+    <!-- Medications -->
+    <div class="sec-card" id="sec-meds" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128138;</span><span class="sec-hdr-title">Current Medications (MAR)</span></div>
+      <div class="sec-body" id="sec-meds-body"></div>
+    </div>
+
+    <!-- Notes -->
+    <div class="sec-card" id="sec-notes" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128221;</span><span class="sec-hdr-title">Nursing Notes <span style="opacity:.6;font-weight:400;font-size:11px">(5 most recent)</span></span></div>
+      <div class="sec-body" id="sec-notes-body"></div>
+    </div>
+
+    <!-- Care Plan -->
+    <div class="sec-card" id="sec-cp" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#127919;</span><span class="sec-hdr-title">Nursing Care Plan</span></div>
+      <div class="sec-body" id="sec-cp-body"></div>
+    </div>
+
+    <!-- Filled Forms -->
+    <div class="sec-card" id="sec-forms" style="display:none">
+      <div class="sec-hdr"><span style="font-size:16px">&#128196;</span><span class="sec-hdr-title">Filled Forms</span></div>
+      <div class="sec-body" id="sec-forms-body"></div>
+    </div>
+
+    <div class="chart-footer">
+      HCT Institute EHR &nbsp;&bull;&nbsp; <strong>READ-ONLY CHART</strong> &nbsp;&bull;&nbsp; Generated: <span id="gen-time"></span><br>
+      This document contains protected health information. Handle per applicable data privacy regulations (RA 10173).
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script>
+(function(){
+  /* ── URL params ── */
+  var params  = new URLSearchParams(window.location.search);
+  var pxId    = params.get('id')  || '';
+  var mrnUrl  = params.get('mrn') || '';
+
+  var sb = null;
+
+  /* ── Init Supabase ── */
+  function initSb(){
+    if(sb) return sb;
+    var cfg = window.HCT_CONFIG || {};
+    if(!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY){ msg('Configuration missing.','error'); return null; }
+    sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+    return sb;
+  }
+
+  /* ── Message helper ── */
+  function msg(text, type){
+    var el = document.getElementById('msg-box');
+    el.textContent = text; el.className = 'msg-box ' + type;
+  }
+
+  /* ── Login ── */
+  window.doLogin = function(){
+    var client = initSb(); if(!client) return;
+    var email  = document.getElementById('in-email').value.trim();
+    var pw     = document.getElementById('in-pw').value;
+    if(!email || !pw){ msg('Enter email and password.','error'); return; }
+    var btn = document.getElementById('btn-login');
+    btn.disabled = true; btn.textContent = 'Signing in…';
+    msg('Authenticating…','info');
+    client.auth.signInWithPassword({email:email,password:pw}).then(function(r){
+      if(r.error){ msg(r.error.message,'error'); btn.disabled=false; btn.textContent='Sign In to View Chart'; }
+      else{ msg('Loading chart…','info'); loadChart(client); }
+    });
+  };
+
+  /* ── Auto-check existing session ── */
+  var _sb = initSb();
+  if(_sb) _sb.auth.getSession().then(function(r){
+    if(r.data && r.data.session) loadChart(_sb);
+  });
+
+  /* ── Load chart data from Supabase ── */
+  function loadChart(client){
+    if(!pxId){
+      show(); document.getElementById('px-name').textContent = 'No patient ID in URL.'; return;
+    }
+    Promise.all([
+      client.from('ehr_patients').select('*').eq('id', pxId).single(),
+      client.from('shared_ehr_state').select('state_key,data').eq('px_id', pxId)
+    ]).then(function(res){
+      var pxRes  = res[0];
+      var stRes  = res[1];
+      if(pxRes.error || !pxRes.data){
+        msg('Patient not found or access denied: '+(pxRes.error?pxRes.error.message:'no data'),'error');
+        var btn=document.getElementById('btn-login'); btn.disabled=false; btn.textContent='Sign In to View Chart';
+        return;
+      }
+      show();
+      /* Build stateMap: key → per-patient data */
+      var stateMap = {};
+      (stRes.data || []).forEach(function(row){ stateMap[row.state_key] = row.data; });
+      render(pxRes.data, stateMap);
+    }).catch(function(e){
+      msg('Error: '+(e.message||e),'error');
+      var btn=document.getElementById('btn-login'); btn.disabled=false; btn.textContent='Sign In to View Chart';
+    });
+  }
+
+  function show(){
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('chart-screen').style.display = 'block';
+  }
+
+  /* ── Helpers ── */
+  function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function cap(s){ return s ? s.charAt(0).toUpperCase()+s.slice(1) : ''; }
+  function ic(lbl,val){ return '<div class="info-cell"><div class="info-lbl">'+esc(lbl)+'</div><div class="info-val">'+esc(val||'—')+'</div></div>'; }
+  function show$(id){ document.getElementById(id).style.display='block'; }
+
+  /* ── Render ── */
+  function render(px, st){
+    var genDt = new Date().toLocaleString('en-PH',{dateStyle:'long',timeStyle:'short'});
+    document.getElementById('gen-time').textContent = genDt;
+
+    /* Edit Chart button — pass pxId back to EHR */
+    var editBtn = document.getElementById('edit-chart-btn');
+    if(editBtn) editBtn.href = 'index.html';
+
+    /* Print letterhead patient summary */
+    var plPx = document.getElementById('pl-px-summary');
+    if(plPx){
+      var mrnPl = px.mrn || mrnUrl || '—';
+      plPx.innerHTML =
+        '<div class="pl-px-name">'+esc(px.name||'Unknown Patient')+'</div>'+
+        '<span><strong>MRN:</strong> '+esc(mrnPl)+'</span>'+
+        '<span><strong>DOB:</strong> '+esc(px.dob||'—')+'</span>'+
+        '<span><strong>Age/Sex:</strong> '+esc((px.age||'—')+' y/o / '+(px.sex==='M'?'Male':px.sex==='F'?'Female':px.sex||'—'))+'</span>'+
+        '<span><strong>Room:</strong> '+esc(px.room||'—')+'</span>'+
+        '<span><strong>Ward:</strong> '+esc(px.ward||'—')+'</span>'+
+        '<span><strong>Physician:</strong> '+esc(px.physician||'—')+'</span>'+
+        '<span><strong>Admission:</strong> '+esc(px.admitted||'—')+'</span>'+
+        '<span><strong>Dx:</strong> '+esc(px.dx||'—')+'</span>'+
+        '<span style="margin-left:auto;font-size:10px;color:var(--text-muted)">Generated: '+esc(genDt)+'</span>';
+    }
+
+    /* Banner */
+    var initials = (px.name||'?').split(' ').map(function(w){return w[0]||'';}).join('').toUpperCase().substring(0,2);
+    var av = document.getElementById('px-av');
+    if(px.photo){ av.innerHTML='<img src="'+esc(px.photo)+'" alt="photo"/>'; } else { av.textContent=initials; }
+    document.getElementById('px-name').textContent = px.name || 'Unknown Patient';
+
+    var statusCls = {admitted:'status-admitted',critical:'status-critical',isolation:'status-isolation',discharge:'status-discharge'}[px.status]||'status-admitted';
+    var statusTxt = px.status==='discharge'?'For Discharge':cap(px.status||'Admitted');
+    var stat = document.getElementById('px-stat');
+    stat.textContent = statusTxt; stat.className = 'px-status '+statusCls;
+
+    var mrnDisplay = px.mrn || mrnUrl || '—';
+    var sectLabel  = {inpatient:'Inpatient',outpatient:'Outpatient',ltc:'Long-Term Care'}[px.section_type]||cap(px.section_type||'');
+    document.getElementById('px-meta').innerHTML =
+      '<span>MRN: '+esc(mrnDisplay)+'</span>'+
+      '<span>'+esc(px.age||'—')+' y/o '+esc(px.sex==='M'?'Male':px.sex==='F'?'Female':px.sex||'—')+'</span>'+
+      '<span>Admitted: '+esc(px.admitted||'—')+'</span>'+
+      '<span>'+esc(sectLabel)+'</span>';
+
+    /* Demographics */
+    document.getElementById('sec-demo').innerHTML =
+      ic('Full Name',px.name)+
+      ic('Date of Birth',px.dob||'—')+
+      ic('Age',(px.age?px.age+' years':null))+
+      ic('Sex',px.sex==='M'?'Male':px.sex==='F'?'Female':px.sex||'—')+
+      ic('MRN',mrnDisplay)+
+      ic('Room / Bed',px.room)+
+      ic('Ward / Unit',px.ward)+
+      ic('Visit Type',sectLabel)+
+      ic('Physician',px.physician)+
+      ic('Admitting Diagnosis',px.dx)+
+      ic('Admission Date',px.admitted)+
+      ic('Status',statusTxt);
+
+    /* ── Allergies ── */
+    var allergies = (st['ALLERGIES'] && Array.isArray(st['ALLERGIES']) && st['ALLERGIES'].length)
+      ? st['ALLERGIES']
+      : (Array.isArray(px.allergies) ? px.allergies : []);
+    if(allergies.length){
+      show$('sec-allergy');
+      document.getElementById('sec-allergy-body').innerHTML = allergies.map(function(a){
+        var name = a.allergen||a.drug||String(a);
+        var rxn  = a.reaction||a.type||'';
+        return '<span class="al-badge">&#9888; '+esc(name)+(rxn?' — '+esc(rxn):'')+'</span>';
+      }).join('');
+    }
+
+    /* ── Vitals ── */
+    var vsData = st['VS_DATA'] || {};
+    function latestVs(key){ var arr=vsData[key]||[]; return arr.length ? arr[arr.length-1] : null; }
+    var vsTiles=[];
+    var bpE=latestVs('blood-pressure');
+    if(bpE){ var s=parseInt(bpE.bpSys||0),d=parseInt(bpE.bpDia||0);
+      var c=s>=180||s<90?'crit':s>=140||d>=90?'warn':'ok';
+      vsTiles.push(vsTile('Blood Pressure',s+'/'+d,'mmHg',c,bpE.time||'')); }
+    var hrE=latestVs('heart-rate');
+    if(hrE){ var h=parseInt(hrE.value||0);
+      vsTiles.push(vsTile('Heart Rate',h,'bpm',h>120||h<50?'crit':h>100?'warn':'ok',hrE.time||'')); }
+    var rrE=latestVs('respirations');
+    if(rrE){ var r=parseInt(rrE.value||0);
+      vsTiles.push(vsTile('Resp Rate',r,'/min',r>24||r<10?'crit':r>20?'warn':'ok',rrE.time||'')); }
+    var tE=latestVs('temperature');
+    if(tE){ var t=parseFloat(tE.value||0);
+      vsTiles.push(vsTile('Temperature',t.toFixed(1),'°C',t>=40||t<36?'crit':t>=38.5?'warn':'ok',tE.time||'')); }
+    var spE=latestVs('pulse-ox');
+    if(spE){ var sp=parseInt(spE.value||0);
+      vsTiles.push(vsTile('SpO₂',sp,'%',sp<90?'crit':sp<95?'warn':'ok',spE.time||'')); }
+    var wtE=latestVs('weight');
+    if(wtE){ vsTiles.push(vsTile('Weight',parseFloat(wtE.value||0).toFixed(1),'kg','',wtE.time||'')); }
+    if(vsTiles.length){
+      show$('sec-vitals');
+      document.getElementById('sec-vitals-body').innerHTML='<div class="vs-grid">'+vsTiles.join('')+'</div>';
+    }
+
+    /* ── Physical Examination ── */
+    var peData = st['PE_ENTRIES'] || {};
+    var PE_SYS_LIST = [
+      {key:'general', icon:'&#9874;',  name:'General / Vital Signs'},
+      {key:'heent',   icon:'&#128065;',name:'HEENT'},
+      {key:'skin',    icon:'&#129654;',name:'Integumentary (Skin)'},
+      {key:'cardio',  icon:'&#10084;', name:'Cardiovascular & Respiratory'},
+      {key:'gigu',    icon:'&#128308;',name:'GI / GU (Abdomen)'},
+      {key:'msk',     icon:'&#128170;',name:'Musculoskeletal'},
+      {key:'neuro',   icon:'&#129504;',name:'Neurological'},
+      {key:'psych',   icon:'&#128100;',name:'Psychosocial / Mental Status'},
+      {key:'lymph',   icon:'&#128337;',name:'Lymphatic / Endocrine'},
+      {key:'other',   icon:'&#128203;',name:'Other Findings'}
+    ];
+    var anyPeEntry = PE_SYS_LIST.some(function(s){ return peData[s.key]; });
+    if(anyPeEntry){
+      show$('sec-pe');
+      var peRows = PE_SYS_LIST.map(function(sys){
+        var e = peData[sys.key];
+        var status = e ? e.status : 'not-examined';
+        var leftBorder = status==='abnormal' ? 'border-left:4px solid #D64045' : status==='normal' ? 'border-left:4px solid #27AE87' : 'border-left:4px solid rgba(0,0,0,.06)';
+        var badgeCss = status==='abnormal' ? 'background:#FEF2F2;color:#D64045;border:1px solid #FECACA' : status==='normal' ? 'background:#ECFDF5;color:#059669;border:1px solid #A7F3D0' : 'background:#F3F4F6;color:#6B7C99;border:1px solid #E5E7EB';
+        var badgeLbl = status==='abnormal' ? 'Abnormal' : status==='normal' ? 'Normal' : 'Not Examined';
+        var statusBadge = '<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;white-space:nowrap;'+badgeCss+'">'+badgeLbl+'</span>';
+        var detailHtml = '';
+        if(!e){
+          detailHtml = '<span style="color:#6B7C99;font-style:italic;font-size:12px">No examination recorded.</span>';
+        } else {
+          /* Findings badges */
+          var findings = Array.isArray(e.findings) ? e.findings : [];
+          var findBadges = findings.length ? '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">'+findings.map(function(fi){ return '<span style="font-size:11px;background:#FEF2F2;color:#D64045;border:1px solid #FECACA;padding:2px 8px;border-radius:8px">'+esc(fi)+'</span>'; }).join('')+'</div>' : '';
+          var wnlTxt = (status==='normal'&&!findings.length) ? '<span style="font-size:12px;color:#059669;font-style:italic">Within normal limits</span>' : '';
+          /* System-specific clinical chips */
+          var chips = [];
+          if(sys.key==='general'){
+            if(e.bpSys) chips.push('BP: '+esc(e.bpSys)+'/'+esc(e.bpDia)+' mmHg');
+            if(e.hr)    chips.push('HR: '+esc(e.hr)+(e.hrRhythm?' ('+esc(e.hrRhythm)+')':''));
+            if(e.temp)  chips.push('Temp: '+esc(e.temp)+(e.tempUnit||'°C')+(e.tempRoute?' ('+esc(e.tempRoute)+')':''));
+            if(e.rr)    chips.push('RR: '+esc(e.rr)+' br/min');
+            if(e.spo2)  chips.push('SpO₂: '+esc(e.spo2)+'%'+(e.spo2Del?' via '+esc(e.spo2Del):''));
+            if(e.weight) chips.push('Wt: '+esc(e.weight)+(e.weightUnit||'kg'));
+            if(e.height) chips.push('Ht: '+esc(e.height)+(e.heightUnit||'cm'));
+            if(e.bmi)    chips.push('BMI: '+esc(e.bmi));
+            if(e.pain!=null&&e.pain!=='') chips.push('Pain NRS: '+esc(e.pain)+'/10');
+            if(e.appearance) chips.push('Appearance: '+esc(e.appearance));
+            if(e.loc)    chips.push('LOC: '+esc(e.loc));
+          }
+          if(sys.key==='heent'){
+            if(e.pupilR||e.pupilL) chips.push('Pupils: '+esc(e.pupilR)+'mm R / '+esc(e.pupilL)+'mm L');
+            if(e.pupilReact) chips.push(esc(e.pupilReact));
+            if(e.pupilShape) chips.push('Shape: '+esc(e.pupilShape));
+          }
+          if(sys.key==='skin'){
+            if(e.skinAssess) chips.push('Skin: '+esc(e.skinAssess));
+            if(e.skinTemp)   chips.push('Temperature: '+esc(e.skinTemp));
+            if(e.turgor)     chips.push('Turgor: '+esc(e.turgor));
+            if(e.edemaLoc)   chips.push('Edema: '+esc(e.edemaLoc)+(e.edemaPitting?' ('+esc(e.edemaPitting)+')':''));
+          }
+          if(sys.key==='cardio'){
+            if(e.heartSounds)     chips.push('Heart sounds: '+esc(e.heartSounds));
+            if(e.chestExpansion)  chips.push('Chest expansion: '+esc(e.chestExpansion));
+            if(e.percNote)        chips.push('Percussion: '+esc(e.percNote));
+            if(e.breathSoundsLoc) chips.push('Breath sounds: '+esc(e.breathSoundsLoc));
+          }
+          if(sys.key==='gigu'){
+            if(e.abdomenInspect) chips.push('Abdomen: '+esc(e.abdomenInspect));
+            if(e.bowelSounds)    chips.push('Bowel sounds: '+esc(e.bowelSounds));
+            if(e.tendernessTend) chips.push('Tenderness: '+esc(e.tendernessTend)+(e.tendernessLoc?' at '+esc(e.tendernessLoc):''));
+          }
+          if(sys.key==='msk'){
+            if(e.romGeneral) chips.push('ROM: '+esc(e.romGeneral));
+            if(e.muscleStrUER||e.muscleStrUEL) chips.push('UE strength: '+esc(e.muscleStrUER)+'/5 R, '+esc(e.muscleStrUEL)+'/5 L');
+            if(e.muscleStrLER||e.muscleStrLEL) chips.push('LE strength: '+esc(e.muscleStrLER)+'/5 R, '+esc(e.muscleStrLEL)+'/5 L');
+            if(e.gait) chips.push('Gait: '+esc(e.gait));
+          }
+          if(sys.key==='neuro'){
+            var gE=parseInt(e.gcsE||0),gV=parseInt(e.gcsV||0),gM=parseInt(e.gcsM||0);
+            if(e.gcsE) chips.push('GCS: '+(gE+gV+gM)+'/15 (E'+gE+'/V'+gV+'/M'+gM+')');
+            var ori=[]; if(e.orientPerson) ori.push('Person'); if(e.orientPlace) ori.push('Place'); if(e.orientTime) ori.push('Time'); if(e.orientSituation) ori.push('Situation');
+            if(ori.length) chips.push('Oriented x'+ori.length+': '+ori.join(', '));
+            if(e.cranialNerves) chips.push('CN: '+esc(e.cranialNerves));
+          }
+          var chipHtml = chips.length ? '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">'+chips.map(function(c){ return '<span style="font-size:10px;color:var(--text-muted);background:var(--cream);padding:2px 7px;border-radius:6px;border:1px solid var(--border)">'+c+'</span>'; }).join('')+'</div>' : '';
+          var noteHtml = e.notes ? '<div style="font-size:11px;color:var(--text-muted);margin-top:6px;padding:5px 8px;background:#F8F7F3;border-radius:6px;border-left:2px solid var(--border)"><em>Note:</em> '+esc(e.notes)+'</div>' : '';
+          var examMeta = e.examined_at ? '<div style="font-size:10px;color:var(--text-light);margin-top:5px">Examined: '+esc(e.examined_at)+(e.examined_by?' by '+esc(e.examined_by):'')+'</div>' : '';
+          detailHtml = (findBadges||wnlTxt) + chipHtml + noteHtml + examMeta;
+        }
+        return '<tr style="border-bottom:1px solid var(--border)">'+
+          '<td style="padding:10px 12px;vertical-align:top;white-space:nowrap;width:150px;'+leftBorder+'">'+
+            '<div style="font-size:12px;font-weight:600;color:var(--navy)">'+sys.icon+' '+sys.name+'</div>'+
+            '<div style="margin-top:5px">'+statusBadge+'</div>'+
+          '</td>'+
+          '<td style="padding:10px 12px;vertical-align:top">'+detailHtml+'</td>'+
+        '</tr>';
+      }).join('');
+      document.getElementById('sec-pe-body').innerHTML =
+        '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-family:\'DM Sans\',sans-serif">'+
+          '<thead><tr style="background:var(--navy)">'+
+            '<th style="padding:10px 12px;text-align:left;color:rgba(255,255,255,.7);font-size:11px;letter-spacing:.5px;text-transform:uppercase;width:150px">System</th>'+
+            '<th style="padding:10px 12px;text-align:left;color:rgba(255,255,255,.7);font-size:11px;letter-spacing:.5px;text-transform:uppercase">Findings &amp; Details</th>'+
+          '</tr></thead>'+
+          '<tbody>'+peRows+'</tbody>'+
+        '</table></div>';
+    }
+
+    /* ── Problem List ── */
+    var probs = Array.isArray(st['PROB_LIST_STORE']) ? st['PROB_LIST_STORE'] : [];
+    var activeProbs = probs.filter(function(p){ return p.status !== 'Resolved'; });
+    if(activeProbs.length){
+      show$('sec-probs');
+      document.getElementById('sec-probs-body').innerHTML=
+        '<table class="rt"><thead><tr>'+
+          '<th>ICD-10</th><th>Problem / Diagnosis</th><th>Type</th><th>Status</th><th>Onset</th>'+
+        '</tr></thead><tbody>'+
+        activeProbs.map(function(p){
+          var tCls = 'pt-'+(p.type||'').replace(/[\s\/]/g,'-');
+          return '<tr>'+
+            '<td><strong>'+esc(p.code||'—')+'</strong></td>'+
+            '<td>'+esc(p.desc||'—')+'</td>'+
+            '<td><span class="pt '+tCls+'">'+esc(p.type||'—')+'</span></td>'+
+            '<td style="color:'+(p.status==='Active'?'var(--admitted)':'var(--text-muted)')+'">'+esc(p.status||'—')+'</td>'+
+            '<td>'+esc(p.onset||'—')+'</td>'+
+          '</tr>';
+        }).join('')+
+        '</tbody></table>';
+    }
+
+    /* ── Patient History (HPI + PMSH) ── */
+    var hpi  = st['HPI_STORE']  || {};
+    var pmsh = st['PMSH_STORE'] || {};
+    var hxParts = [];
+
+    /* HPI */
+    var hpiFields = [
+      ['Chief Complaint', hpi.chiefComplaint||hpi.cc],
+      ['History of Present Illness', hpi.hpi||hpi.narrative],
+      ['Onset', hpi.onset], ['Duration', hpi.duration],
+      ['Character', hpi.character], ['Location', hpi.location],
+      ['Severity', hpi.severity], ['Associated Symptoms', hpi.associated]
+    ];
+    var hpiRows = hpiFields.filter(function(f){ return f[1]; });
+    if(hpiRows.length){
+      hxParts.push('<div class="hx-section"><div class="hx-lbl">History of Present Illness</div>'+
+        hpiRows.map(function(f){
+          return '<div style="margin-bottom:6px"><div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px">'+esc(f[0])+'</div>'+
+            '<div style="font-size:12px;color:var(--text);line-height:1.6;white-space:pre-wrap">'+esc(f[1])+'</div></div>';
+        }).join('')+'</div>');
+    }
+
+    /* PMH */
+    var pmh = Array.isArray(pmsh.pmh) ? pmsh.pmh : (pmsh.pmh ? [pmsh.pmh] : []);
+    if(pmh.length) hxParts.push('<div class="hx-section"><div class="hx-lbl">Past Medical History</div>'+
+      pmh.map(function(i){ return '<div class="hx-item"><span>'+esc(typeof i==='object'?(i.condition||i.dx||JSON.stringify(i)):i)+'</span></div>'; }).join('')+'</div>');
+
+    /* PSH */
+    var psh = Array.isArray(pmsh.psh) ? pmsh.psh : (pmsh.psh ? [pmsh.psh] : []);
+    if(psh.length) hxParts.push('<div class="hx-section"><div class="hx-lbl">Past Surgical History</div>'+
+      psh.map(function(i){ return '<div class="hx-item"><span>'+esc(typeof i==='object'?(i.procedure||i.surgery||JSON.stringify(i)):i)+'</span></div>'; }).join('')+'</div>');
+
+    /* Family / Social */
+    if(pmsh.familyHistory||pmsh.fh) hxParts.push('<div class="hx-section"><div class="hx-lbl">Family History</div><div class="hx-txt">'+esc(pmsh.familyHistory||pmsh.fh)+'</div></div>');
+    if(pmsh.socialHistory||pmsh.sh) hxParts.push('<div class="hx-section"><div class="hx-lbl">Social History</div><div class="hx-txt">'+esc(pmsh.socialHistory||pmsh.sh)+'</div></div>');
+    if(pmsh.allergies||pmsh.al)     hxParts.push('<div class="hx-section"><div class="hx-lbl">Allergy History</div><div class="hx-txt">'+esc(pmsh.allergies||pmsh.al)+'</div></div>');
+    if(pmsh.medications||pmsh.homeMeds) hxParts.push('<div class="hx-section"><div class="hx-lbl">Home Medications</div><div class="hx-txt">'+esc(pmsh.medications||pmsh.homeMeds)+'</div></div>');
+
+    if(hxParts.length){
+      show$('sec-hx');
+      document.getElementById('sec-hx-body').innerHTML = hxParts.join('');
+    }
+
+    /* ── SBAR ── */
+    // SBAR_STORE for a patient is {data:{S,B,A,R}, saved_at, saved_by, history:[...]},
+    // not a flat array of {situation,background,...} — unwrap it into that shape
+    // (current entry first, then prior versions) so saved content actually shows here.
+    var sbarRaw = st['SBAR_STORE'];
+    var sbarArr = [];
+    if(sbarRaw && typeof sbarRaw==='object' && !Array.isArray(sbarRaw)){
+      if(sbarRaw.data) sbarArr.push({data:sbarRaw.data, saved_at:sbarRaw.saved_at, saved_by:sbarRaw.saved_by});
+      (sbarRaw.history||[]).forEach(function(h){ if(h&&h.data) sbarArr.push(h); });
+    } else if(Array.isArray(sbarRaw)){
+      sbarArr = sbarRaw;
+    }
+    if(sbarArr.length){
+      show$('sec-sbar');
+      document.getElementById('sec-sbar-body').innerHTML = sbarArr.slice(0,5).map(function(s){
+        var d = s.data||s;
+        var html = '<div class="sbar-block">';
+        if(d.situation||d.S)   html+='<div class="sbar-row"><div class="sbar-lbl">S — Situation</div><div class="sbar-txt">'+esc(d.situation||d.S)+'</div></div>';
+        if(d.background||d.B)  html+='<div class="sbar-row"><div class="sbar-lbl">B — Background</div><div class="sbar-txt">'+esc(d.background||d.B)+'</div></div>';
+        if(d.assessment||d.A)  html+='<div class="sbar-row"><div class="sbar-lbl">A — Assessment</div><div class="sbar-txt">'+esc(d.assessment||d.A)+'</div></div>';
+        if(d.recommendation||d.R) html+='<div class="sbar-row"><div class="sbar-lbl">R — Recommendation</div><div class="sbar-txt">'+esc(d.recommendation||d.R)+'</div></div>';
+        var by = s.saved_by||s.auth||s.author||s._by||''; var ts = s.saved_at||s.ts||s.time||s.date||'';
+        if(by||ts) html+='<div class="sbar-meta">'+[by?esc(by):'',ts?esc(ts):''].filter(Boolean).join(' · ')+'</div>';
+        html += '</div>';
+        return html;
+      }).join('');
+    }
+
+    /* ── Orders ── */
+    var orders = Array.isArray(st['ORDERS_STORE']) ? st['ORDERS_STORE'] : [];
+    var activeOrders = orders.filter(function(o){ return o.status !== 'Discontinued' && o.status !== 'Completed'; });
+    if(activeOrders.length){
+      show$('sec-orders');
+      document.getElementById('sec-orders-body').innerHTML = activeOrders.map(function(o){
+        var type = o.type||'general';
+        var typeLbl = {medication:'Medication',lab:'Lab',imaging:'Imaging',diet:'Diet',activity:'Activity',fluid:'Fluid',consult:'Consult'}[type]||cap(type);
+        var badgeCls = 'ord-'+(type==='medication'?'medication':type==='lab'?'lab':type==='imaging'?'imaging':type==='diet'?'diet':type==='activity'?'activity':'general');
+        var name = o.drug||o.lab_test||o.study||o.diet_type||o.activity_level||o.fluid||o.service||o.description||o.name||'—';
+        var details = [
+          o.dose&&o.doseUnit?(o.dose+' '+o.doseUnit):o.dose||null,
+          o.route||null, o.freq||null,
+          o.duration?('x '+o.duration):null,
+          o.doctor?('Ordered by: '+o.doctor):null,
+          o.date||o.ordered_date||null,
+          o.status&&o.status!=='Active'?o.status:null
+        ].filter(Boolean).map(esc).join(' &nbsp;·&nbsp; ');
+        return '<div class="ord-row">'+
+          '<span class="ord-badge '+badgeCls+'">'+esc(typeLbl)+'</span>'+
+          '<div class="ord-body">'+
+            '<div class="ord-name">'+esc(name)+'</div>'+
+            (details?'<div class="ord-det">'+details+'</div>':'')+
+          '</div></div>';
+      }).join('');
+    }
+
+    /* ── Labs ── */
+    var labData   = st['LAB_DATA']    || {};
+    var panelsRaw = st['PANELS_STORE'] || {};
+    var labGroups = [];
+
+    /* Individual labs */
+    Object.keys(labData).forEach(function(labId){
+      var entries = Array.isArray(labData[labId]) ? labData[labId] : [];
+      if(!entries.length) return;
+      var latest = entries[entries.length-1];
+      var val = parseFloat(latest.value);
+      var ref = latest.ref||'';
+      var refParts = ref.match(/([\d.]+)-([\d.]+)/);
+      var flag = '';
+      var valCls = '';
+      if(refParts && !isNaN(val)){
+        var lo=parseFloat(refParts[1]),hi=parseFloat(refParts[2]);
+        if(val>hi){ flag='H'; valCls=val>hi*1.2?'crit':'warn'; }
+        else if(val<lo){ flag='L'; valCls=val<lo*0.8?'crit':'warn'; }
+        else { valCls='ok'; }
+      }
+      labGroups.push({
+        id:labId,
+        name:latest.labName||labId,
+        html:'<div class="lab-result-row">'+
+          '<div class="lab-result-name">'+esc(latest.labName||labId)+'</div>'+
+          '<div class="lab-result-val '+valCls+'">'+esc(String(latest.value||'—'))+(latest.unit?' <span style="font-size:10px;font-weight:400">'+esc(latest.unit)+'</span>':'')+'</div>'+
+          (flag?'<span class="lab-flag '+flag+'">'+esc(flag)+'</span>':'')+
+          (ref?'<div class="lab-result-ref">Ref: '+esc(ref)+'</div>':'')+
+          (latest.date||latest.time?'<div class="lab-result-time">'+esc((latest.date||'')+(latest.time?' '+latest.time:''))+'</div>':'')+
+        '</div>'
+      });
+    });
+
+    /* Panels */
+    var panelsArr = Array.isArray(panelsRaw) ? panelsRaw : (panelsRaw && typeof panelsRaw==='object' ? Object.values(panelsRaw) : []);
+    panelsArr.forEach(function(panel){
+      if(!panel || typeof panel!=='object') return;
+      var tests = Array.isArray(panel.tests) ? panel.tests : (Array.isArray(panel.results) ? panel.results : []);
+      if(!tests.length) return;
+      var panelHtml = '<div class="lab-group">'+
+        '<div class="lab-group-hdr">'+
+          '<span>'+esc(panel.name||panel.panel||panel.title||'Panel')+'</span>'+
+          (panel.date||panel.ts?'<span style="font-size:10px;color:var(--text-muted)">'+esc(panel.date||panel.ts)+'</span>':'')+
+        '</div>'+
+        tests.map(function(t){
+          if(!t||typeof t!=='object') return '';
+          var tv=parseFloat(t.value||t.result);
+          var tref=t.ref||t.reference||'';
+          var trp=tref.match(/([\d.]+)-([\d.]+)/);
+          var tf=''; var tc='';
+          if(trp&&!isNaN(tv)){
+            var tlo=parseFloat(trp[1]),thi=parseFloat(trp[2]);
+            if(tv>thi){tf='H';tc=tv>thi*1.2?'crit':'warn';}
+            else if(tv<tlo){tf='L';tc=tv<tlo*0.8?'crit':'warn';}
+            else{tc='ok';}
+          }
+          return '<div class="lab-result-row">'+
+            '<div class="lab-result-name">'+esc(t.name||t.test||t.labName||'—')+'</div>'+
+            '<div class="lab-result-val '+tc+'">'+esc(String(t.value||t.result||'—'))+(t.unit?' <span style="font-size:10px;font-weight:400">'+esc(t.unit)+'</span>':'')+'</div>'+
+            (tf?'<span class="lab-flag '+tf+'">'+esc(tf)+'</span>':'')+
+            (tref?'<div class="lab-result-ref">Ref: '+esc(tref)+'</div>':'')+
+          '</div>';
+        }).join('')+
+      '</div>';
+      labGroups.push({isPanelHtml:true, html:panelHtml});
+    });
+
+    if(labGroups.length){
+      show$('sec-labs');
+      var labHtml = '';
+      var indivGroups = labGroups.filter(function(g){ return !g.isPanelHtml; });
+      var panelHtmls  = labGroups.filter(function(g){ return  g.isPanelHtml; });
+      if(indivGroups.length){
+        labHtml += '<div class="lab-group">'+
+          '<div class="lab-group-hdr"><span>Individual Results</span></div>'+
+          indivGroups.map(function(g){ return g.html; }).join('')+
+        '</div>';
+      }
+      panelHtmls.forEach(function(g){ labHtml += g.html; });
+      document.getElementById('sec-labs-body').innerHTML = labHtml;
+    }
+
+    /* ── I & O ── */
+    var ioEntries = Array.isArray(st['IO_ENTRIES']) ? st['IO_ENTRIES'] : [];
+    if(ioEntries.length){
+      show$('sec-io');
+      var totalIn=0, totalOut=0;
+      ioEntries.forEach(function(e){
+        var v=parseFloat(e.volume||e.amount||0);
+        if(e.type==='intake'||e.type==='Intake') totalIn+=v;
+        else if(e.type==='output'||e.type==='Output') totalOut+=v;
+      });
+      var balance=totalIn-totalOut;
+      var balCls=balance>=0?'balance-pos':'balance-neg';
+      var html='<div class="io-summary">'+
+        '<div class="io-sum-box"><div class="io-sum-lbl">Total Intake</div><div class="io-sum-val">'+Math.round(totalIn)+'</div><div class="io-sum-unit">mL</div></div>'+
+        '<div class="io-sum-box"><div class="io-sum-lbl">Total Output</div><div class="io-sum-val">'+Math.round(totalOut)+'</div><div class="io-sum-unit">mL</div></div>'+
+        '<div class="io-sum-box '+balCls+'"><div class="io-sum-lbl">Balance</div><div class="io-sum-val">'+(balance>=0?'+':'')+Math.round(balance)+'</div><div class="io-sum-unit">mL</div></div>'+
+      '</div>';
+      html+='<table class="rt"><thead><tr><th>Type</th><th>Category</th><th>Volume</th><th>Time / Date</th><th>Recorded By</th></tr></thead><tbody>'+
+        ioEntries.slice().reverse().slice(0,20).map(function(e){
+          var v=parseFloat(e.volume||e.amount||0);
+          var isIn=e.type==='intake'||e.type==='Intake';
+          return '<tr>'+
+            '<td style="color:'+(isIn?'var(--admitted)':'var(--critical)')+'"><strong>'+esc(cap(e.type||'—'))+'</strong></td>'+
+            '<td>'+esc(e.category||e.route||e.source||'—')+'</td>'+
+            '<td><strong>'+Math.round(v)+'</strong> mL</td>'+
+            '<td>'+esc((e.time||'')+(e.date?' · '+e.date:''))+'</td>'+
+            '<td>'+esc(e._by||e.recordedBy||'—')+'</td>'+
+          '</tr>';
+        }).join('')+
+      '</tbody></table>';
+      if(ioEntries.length>20) html+='<p style="font-size:11px;color:var(--text-muted);margin-top:8px">Showing 20 most recent of '+ioEntries.length+' entries.</p>';
+      document.getElementById('sec-io-body').innerHTML = html;
+    }
+
+    /* ── Screenings & Scales ── */
+    var scrEntries = Array.isArray(st['SCR_ENTRIES']) ? st['SCR_ENTRIES'] : [];
+    if(scrEntries.length){
+      show$('sec-scr');
+      document.getElementById('sec-scr-body').innerHTML = scrEntries.slice().reverse().map(function(s){
+        var score = s.score!=null ? s.score : (s.totalScore!=null ? s.totalScore : null);
+        var result = s.result||s.interpretation||s.risk||'';
+        var rCls = /high|severe|positive|abnormal/i.test(result)?'high-risk':/moderate|mild|moderate-risk/i.test(result)?'moderate':'low-risk normal'.split(' ').find(function(k){ return result.toLowerCase().indexOf(k)>-1; })?'normal':'low-risk';
+        var html='<div class="scr-card">'+
+          '<div class="scr-top">'+
+            '<div class="scr-tool">'+esc(s.tool||s.scale||s.name||'Screening')+'</div>'+
+            (score!=null||result?'<div class="scr-score-box">'+
+              (score!=null?'<div class="scr-score">'+esc(String(score))+'</div>':'')+
+              (result?'<span class="scr-result '+rCls+'">'+esc(result)+'</span>':'')+
+            '</div>':'')+
+          '</div>';
+        var items = Array.isArray(s.items) ? s.items : (Array.isArray(s.questions) ? s.questions : []);
+        if(items.length){
+          html+='<div class="scr-items">'+
+            items.map(function(it){
+              return '<div class="scr-item">'+
+                '<span>'+esc(it.q||it.question||it.label||'—')+'</span>'+
+                '<span style="font-weight:600;color:var(--navy)">'+esc(String(it.a||it.answer||it.score||'—'))+'</span>'+
+              '</div>';
+            }).join('')+
+          '</div>';
+        }
+        html+='<div class="scr-meta">'+[
+          s._by||s.author||s.recordedBy?'By: '+esc(s._by||s.author||s.recordedBy):null,
+          s.date||s.ts||s.time?esc(s.date||s.ts||s.time):null
+        ].filter(Boolean).join(' · ')+'</div>';
+        html+='</div>';
+        return html;
+      }).join('');
+    }
+
+    /* ── Medications ── */
+    var meds = Array.isArray(st['MAR_MEDS']) ? st['MAR_MEDS'] : [];
+    if(meds.length){
+      show$('sec-meds');
+      document.getElementById('sec-meds-body').innerHTML = meds.map(function(m){
+        return '<div class="med-row"><div class="med-dot"></div><div>'+
+          '<div class="med-name">'+esc(m.drug||m.name||'—')+'</div>'+
+          '<div class="med-det">'+
+            [m.dose&&m.doseUnit?(m.dose+' '+m.doseUnit):null, m.route, m.freq,
+             m.times&&m.times.length?m.times.join(', '):null,
+             m.doctor?'Ordered by: '+m.doctor:null
+            ].filter(Boolean).map(esc).join(' &nbsp;·&nbsp; ')+
+          '</div>'+
+        '</div></div>';
+      }).join('');
+    }
+
+    /* ── Notes ── */
+    var notes = Array.isArray(st['NOTES_STORE']) ? st['NOTES_STORE'] : [];
+    notes = notes.slice().sort(function(a,b){ return (b.ts||0)-(a.ts||0); }).slice(0,5);
+    if(notes.length){
+      show$('sec-notes');
+      document.getElementById('sec-notes-body').innerHTML = notes.map(function(n){
+        return '<div class="note-row">'+
+          '<div class="note-top">'+
+            '<span class="note-auth">'+esc(n.auth||'Unknown')+'</span>'+
+            '<span class="note-ts">'+esc(n.time||'—')+'</span>'+
+            (n.type?'<span class="note-typ">'+esc(n.type)+'</span>':'')+
+          '</div>'+
+          '<div class="note-txt">'+esc(n.txt||'—')+'</div>'+
+        '</div>';
+      }).join('');
+    }
+
+    /* ── Care Plan ── */
+    var cp = (st['CAREPLAN_STORE'] && typeof st['CAREPLAN_STORE']==='object' && !Array.isArray(st['CAREPLAN_STORE']))
+      ? st['CAREPLAN_STORE'] : {};
+    var diags = Array.isArray(cp.diagnoses) ? cp.diagnoses : [];
+    if(diags.length){
+      show$('sec-cp');
+      document.getElementById('sec-cp-body').innerHTML = diags.map(function(d){
+        return '<div class="cp-card">'+
+          '<div class="cp-nanda">'+esc(d.nanda||d.title||'—')+'</div>'+
+          (d.goal?'<div class="cp-row"><div class="cp-lbl">Goal / Expected Outcome</div><div class="cp-val">'+esc(d.goal)+'</div></div>':'')+
+          (d.interventions?'<div class="cp-row"><div class="cp-lbl">Nursing Interventions</div><div class="cp-val">'+esc(d.interventions)+'</div></div>':'')+
+          (d.eval?'<div class="cp-row"><div class="cp-lbl">Evaluation</div><div class="cp-val">'+esc(d.eval)+'</div></div>':'')+
+        '</div>';
+      }).join('');
+    }
+
+    /* ── Filled Forms ── */
+    var formsStore = st['FORMS_STORE'] || {};
+    var formData   = st['FORM_DATA']   || {};
+    var renderedForms = [];
+
+    /* FORMS_STORE: [{id, title, fields:[{label,value}]}, ...] or object keyed by formId */
+    var formsArr = Array.isArray(formsStore) ? formsStore
+      : (typeof formsStore==='object' ? Object.values(formsStore) : []);
+
+    formsArr.forEach(function(form){
+      if(!form || typeof form!=='object') return;
+      var fields = Array.isArray(form.fields) ? form.fields
+        : (typeof form.data==='object' ? Object.entries(form.data).map(function(e){ return {label:e[0],value:e[1]}; }) : []);
+      var filled = fields.filter(function(f){ return f.value!=null && String(f.value||'').trim()!==''; });
+      if(!filled.length) return;
+      renderedForms.push(
+        '<div class="form-block">'+
+          '<div class="form-title">'+esc(form.title||form.name||form.id||'Form')+'</div>'+
+          filled.map(function(f){
+            return '<div class="form-field">'+
+              '<div class="form-field-lbl">'+esc(f.label||f.name||'Field')+'</div>'+
+              '<div class="form-field-val">'+esc(String(f.value||''))+'</div>'+
+            '</div>';
+          }).join('')+
+        '</div>'
+      );
+    });
+
+    /* FORM_DATA: {formId: {fieldKey: value, ...}} */
+    Object.keys(formData).forEach(function(fId){
+      var fEntries = formData[fId];
+      if(!fEntries || typeof fEntries!=='object') return;
+      var pairs = Object.entries(fEntries).filter(function(e){ return e[1]!=null && String(e[1]||'').trim()!==''; });
+      if(!pairs.length) return;
+      renderedForms.push(
+        '<div class="form-block">'+
+          '<div class="form-title">'+esc(fId)+'</div>'+
+          pairs.map(function(e){
+            return '<div class="form-field">'+
+              '<div class="form-field-lbl">'+esc(e[0])+'</div>'+
+              '<div class="form-field-val">'+esc(String(e[1]||''))+'</div>'+
+            '</div>';
+          }).join('')+
+        '</div>'
+      );
+    });
+
+    if(renderedForms.length){
+      show$('sec-forms');
+      document.getElementById('sec-forms-body').innerHTML = renderedForms.join('');
+    }
+  }
+
+  /* ── Vital tile helper ── */
+  function vsTile(lbl,val,unit,cls,time){
+    return '<div class="vs-tile'+(cls?' '+cls:'')+'">'+
+      '<div class="vs-lbl">'+esc(lbl)+'</div>'+
+      '<div class="vs-val">'+esc(String(val))+'</div>'+
+      '<div class="vs-unit">'+esc(unit)+(time?' &nbsp;·&nbsp; '+esc(time):'')+'</div>'+
+    '</div>';
+  }
+
+})();
+</script>
+</body>
+</html>
